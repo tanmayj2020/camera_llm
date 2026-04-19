@@ -1,6 +1,10 @@
-"""Task 6: Self-learning baseline engine — learns 'normal' without configuration."""
+"""Task 6: Self-learning baseline engine — learns 'normal' without configuration.
+
+Uses Isolation Forest for multivariate anomaly detection alongside z-score baselines.
+"""
 
 import logging
+import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -8,6 +12,63 @@ from dataclasses import dataclass, field
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+class IsolationForestScorer:
+    """Multivariate anomaly scoring using sklearn IsolationForest.
+
+    Features: [object_count, activity, hour_sin, hour_cos, day_sin, day_cos, audio_alert_count]
+    """
+
+    def __init__(self, contamination: float = 0.05):
+        self._contamination = contamination
+        self._model = None
+        self._buffer: list[np.ndarray] = []
+        self._trained = False
+        self._min_samples = 200
+
+    @staticmethod
+    def _extract_features(event: dict) -> np.ndarray:
+        ts = event.get("timestamp", time.time())
+        hour = (ts % 86400) / 3600
+        day = ((ts // 86400) % 7)
+        n_objects = len(event.get("objects", []))
+        activity = event.get("scene_activity", 0.0)
+        audio_alerts = sum(1 for a in event.get("audio_events", []) if a.get("is_alert"))
+        return np.array([
+            n_objects, activity,
+            math.sin(2 * math.pi * hour / 24), math.cos(2 * math.pi * hour / 24),
+            math.sin(2 * math.pi * day / 7), math.cos(2 * math.pi * day / 7),
+            audio_alerts,
+        ])
+
+    def ingest(self, event: dict):
+        self._buffer.append(self._extract_features(event))
+        if len(self._buffer) > 10000:
+            self._buffer = self._buffer[-5000:]
+
+    def train(self):
+        if len(self._buffer) < self._min_samples:
+            return
+        try:
+            from sklearn.ensemble import IsolationForest
+            X = np.array(self._buffer)
+            self._model = IsolationForest(
+                contamination=self._contamination, random_state=42, n_estimators=100)
+            self._model.fit(X)
+            self._trained = True
+            logger.info("IsolationForest trained on %d samples", len(X))
+        except Exception as e:
+            logger.warning("IsolationForest training failed: %s", e)
+
+    def score(self, event: dict) -> float:
+        """Returns anomaly score 0-1 (higher = more anomalous)."""
+        if not self._trained or self._model is None:
+            return 0.0
+        features = self._extract_features(event).reshape(1, -1)
+        raw = self._model.decision_function(features)[0]
+        # decision_function: negative = anomaly, positive = normal
+        return float(np.clip(-raw / 0.5, 0, 1))
 
 
 @dataclass
@@ -40,12 +101,14 @@ class BaselineLearner:
 
     def __init__(self, onboarding_hours: float = 48.0, ema_alpha: float = 0.01):
         self.onboarding_hours = onboarding_hours
-        self.ema_alpha = ema_alpha  # exponential moving average for incremental updates
+        self.ema_alpha = ema_alpha
         self._start_time = time.time()
         self._zone_baselines: dict[str, ZoneBaseline] = defaultdict(ZoneBaseline)
         self._audio_baseline = AudioBaseline()
         self._hourly_object_counts: dict[str, list[int]] = defaultdict(lambda: [0] * 24)
         self._event_buffer: list[dict] = []
+        self._iforest = IsolationForestScorer()
+        self._iforest_trained = False
 
     @property
     def is_onboarding(self) -> bool:
@@ -54,8 +117,9 @@ class BaselineLearner:
     def ingest_event(self, event: dict) -> None:
         """Feed an event into the baseline learner."""
         self._event_buffer.append(event)
+        self._iforest.ingest(event)
         ts = event.get("timestamp", time.time())
-        hour = int((ts % 86400) / 3600)  # hour of day (UTC)
+        hour = int((ts % 86400) / 3600)
         camera_id = event.get("camera_id", "default")
 
         # Count objects per zone/camera per hour
@@ -88,15 +152,19 @@ class BaselineLearner:
             arr = np.array(counts, dtype=float)
             total_hours = max(self.onboarding_hours / 24, 1)
             bl.hourly_counts = arr / total_hours
-            bl.hourly_variance = np.maximum(bl.hourly_counts * 0.5, 1.0)  # initial variance estimate
+            bl.hourly_variance = np.maximum(bl.hourly_counts * 0.5, 1.0)
 
-        # Normalize audio frequencies to per-hour
         total_hours = max((time.time() - self._start_time) / 3600, 1)
         for cls in self._audio_baseline.class_frequencies:
             self._audio_baseline.class_frequencies[cls] /= total_hours
 
-        logger.info("Baseline finalized: %d zones, %d audio classes",
-                     len(self._zone_baselines), len(self._audio_baseline.class_frequencies))
+        # Train Isolation Forest on onboarding data
+        self._iforest.train()
+        self._iforest_trained = True
+
+        logger.info("Baseline finalized: %d zones, %d audio classes, iforest=%s",
+                     len(self._zone_baselines), len(self._audio_baseline.class_frequencies),
+                     self._iforest_trained)
 
     def compute_anomaly_score(self, event: dict) -> dict:
         """Compute multi-dimensional anomaly score for an event.
@@ -133,9 +201,19 @@ class BaselineLearner:
 
         overall = max(count_score * 0.4 + activity_score * 0.3 + audio_score * 0.3, 0.0)
 
+        # Combine with Isolation Forest multivariate score
+        iforest_score = self._iforest.score(event)
+
+        if self._iforest_trained and iforest_score > 0:
+            # Weighted blend: 50% z-score composite, 50% isolation forest
+            overall = 0.5 * min(overall, 1.0) + 0.5 * iforest_score
+        else:
+            overall = min(overall, 1.0)
+
         return {
             "overall": round(min(overall, 1.0), 3),
             "count": round(count_score, 3),
             "activity": round(activity_score, 3),
             "audio": round(audio_score, 3),
+            "iforest": round(iforest_score, 3),
         }

@@ -1,4 +1,8 @@
-"""4D Spatial Intelligence — MiDaS monocular depth, Kalman filtering, proper 3D positions."""
+"""4D Spatial Intelligence — Depth Anything V2 monocular depth, Kalman filtering, proper 3D positions.
+
+Depth Anything V2 (2024) achieves significantly better depth accuracy than MiDaS,
+with Metric3D-style absolute depth output and better handling of indoor scenes.
+"""
 
 import logging
 import math
@@ -78,49 +82,83 @@ class SpatialMemory:
         self._movement_heatmap: np.ndarray = np.zeros((50, 50))
         self._heatmap_bounds = (0, 0, 20, 20)
 
-        # Lazy-loaded MiDaS
-        self._midas_model = None
-        self._midas_transform = None
-        self._midas_available = None
+        # Lazy-loaded depth model (Depth Anything V2 → MiDaS fallback)
+        self._depth_model = None
+        self._depth_processor = None
+        self._depth_available = None
+        self._depth_backend = "none"  # "depth_anything_v2" | "midas" | "none"
         self._last_depth_map: np.ndarray | None = None
 
-    # --- MiDaS depth estimation (lazy) ---
+    # --- Depth Anything V2 / MiDaS depth estimation (lazy) ---
 
-    def _load_midas(self):
-        if self._midas_available is not None:
-            return self._midas_available
+    def _load_depth(self):
+        if self._depth_available is not None:
+            return self._depth_available
+
+        # Priority 1: Depth Anything V2 (SOTA monocular depth, 2024)
+        try:
+            from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+            model_id = "depth-anything/Depth-Anything-V2-Small-hf"
+            self._depth_processor = AutoImageProcessor.from_pretrained(model_id)
+            self._depth_model = AutoModelForDepthEstimation.from_pretrained(model_id)
+            self._depth_model.eval()
+            self._depth_backend = "depth_anything_v2"
+            self._depth_available = True
+            logger.info("Depth Anything V2 depth model loaded")
+            return True
+        except Exception as e:
+            logger.info("Depth Anything V2 unavailable (%s), trying MiDaS", e)
+
+        # Priority 2: MiDaS fallback
         try:
             import torch
-            self._midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True)
-            self._midas_model.eval()
+            self._depth_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True)
+            self._depth_model.eval()
             midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
-            self._midas_transform = midas_transforms.small_transform
-            self._midas_available = True
-            logger.info("MiDaS depth model loaded")
+            self._depth_processor = midas_transforms.small_transform
+            self._depth_backend = "midas"
+            self._depth_available = True
+            logger.info("MiDaS depth model loaded (fallback)")
+            return True
         except Exception as e:
-            logger.warning("MiDaS unavailable, using bbox heuristic: %s", e)
-            self._midas_available = False
-        return self._midas_available
+            logger.warning("All depth models unavailable, using bbox heuristic: %s", e)
+            self._depth_available = False
+            return False
 
     def compute_depth_map(self, frame: np.ndarray) -> np.ndarray | None:
-        """Compute monocular depth map using MiDaS."""
-        if not self._load_midas():
+        """Compute monocular depth map using Depth Anything V2 or MiDaS."""
+        if not self._load_depth():
             return None
+
         try:
             import torch
-            input_batch = self._midas_transform(frame)
-            if torch.cuda.is_available():
-                self._midas_model = self._midas_model.cuda()
-                input_batch = input_batch.cuda()
-            with torch.no_grad():
-                prediction = self._midas_model(input_batch)
-            depth = prediction.squeeze().cpu().numpy()
-            # Normalize to approximate meters (MiDaS outputs inverse relative depth)
-            depth = depth.max() / (depth + 1e-6)
-            self._last_depth_map = depth
-            return depth
+
+            if self._depth_backend == "depth_anything_v2":
+                from PIL import Image
+                img = Image.fromarray(frame[..., ::-1])  # BGR → RGB
+                inputs = self._depth_processor(images=img, return_tensors="pt")
+                with torch.no_grad():
+                    outputs = self._depth_model(**inputs)
+                depth = outputs.predicted_depth.squeeze().cpu().numpy()
+                # Depth Anything V2 outputs relative inverse depth; convert to meters
+                depth = depth.max() / (depth + 1e-6)
+                self._last_depth_map = depth
+                return depth
+
+            elif self._depth_backend == "midas":
+                input_batch = self._depth_processor(frame)
+                if torch.cuda.is_available():
+                    self._depth_model = self._depth_model.cuda()
+                    input_batch = input_batch.cuda()
+                with torch.no_grad():
+                    prediction = self._depth_model(input_batch)
+                depth = prediction.squeeze().cpu().numpy()
+                depth = depth.max() / (depth + 1e-6)
+                self._last_depth_map = depth
+                return depth
+
         except Exception as e:
-            logger.debug("MiDaS inference failed: %s", e)
+            logger.debug("Depth inference failed: %s", e)
             return None
 
     def estimate_depth(self, bbox_height_px: float, class_name: str = "person",
@@ -159,7 +197,7 @@ class SpatialMemory:
                timestamp: float, frame: np.ndarray | None = None) -> SpatialEntity:
         """Update entity position with Kalman filtering."""
         # Optionally update depth map
-        if frame is not None and self._load_midas():
+        if frame is not None and self._load_depth():
             self.compute_depth_map(frame)
 
         measurement = self.bbox_to_3d(bbox, class_name)

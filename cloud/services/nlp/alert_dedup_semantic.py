@@ -1,4 +1,7 @@
-"""Semantic alert deduplication for VisionBrain CCTV Analytics Platform."""
+"""Semantic alert deduplication — SOTA sentence embeddings.
+
+Embedding priority: GTE-Qwen2 (MTEB #1, 2024) → NV-Embed-v2 → all-MiniLM-L6-v2 → n-gram stub.
+"""
 
 import logging
 import math
@@ -7,7 +10,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_HASH_VEC_SIZE = 64
+_HASH_VEC_SIZE = 256
 
 
 class SemanticDeduplicator:
@@ -17,26 +20,78 @@ class SemanticDeduplicator:
         self._model: Optional[object] = None
         self._total_seen = 0
         self._duplicates_suppressed = 0
+        self._backend = "none"
 
     def _get_model(self) -> object:
         if self._model is not None:
             return self._model
+
+        # Priority 1: GTE-Qwen2 (Alibaba, 2024 — MTEB leaderboard #1)
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                                               trust_remote_code=True)
+            self._backend = "gte-qwen2"
+            logger.info("GTE-Qwen2 sentence embeddings loaded (MTEB SOTA)")
+            return self._model
+        except Exception as e:
+            logger.info("GTE-Qwen2 unavailable (%s), trying NV-Embed", e)
+
+        # Priority 2: NV-Embed-v2 (NVIDIA, 2024)
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer("nvidia/NV-Embed-v2", trust_remote_code=True)
+            self._backend = "nv-embed"
+            logger.info("NV-Embed-v2 sentence embeddings loaded")
+            return self._model
+        except Exception as e:
+            logger.info("NV-Embed unavailable (%s), trying MiniLM", e)
+
+        # Priority 3: all-MiniLM-L6-v2 (lightweight fallback)
         try:
             from sentence_transformers import SentenceTransformer
             self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            self._backend = "minilm"
+            logger.info("all-MiniLM-L6-v2 sentence embeddings loaded (fallback)")
+            return self._model
         except Exception as e:
-            logger.warning("sentence-transformers unavailable, using stub: %s", e)
+            logger.warning("sentence-transformers unavailable, using n-gram stub: %s", e)
             self._model = "stub"
+            self._backend = "stub"
         return self._model
 
     def _embed(self, text: str) -> list[float]:
         model = self._get_model()
         if model == "stub":
-            vec = [0.0] * _HASH_VEC_SIZE
-            for w in text.lower().split():
-                vec[hash(w) % _HASH_VEC_SIZE] = 1.0
-            return vec
+            return self._ngram_embed(text)
         return model.encode(text).tolist()
+
+    @staticmethod
+    def _ngram_embed(text: str, n: int = 3) -> list[float]:
+        """TF-IDF style character n-gram hashing — much better than single-word hashing."""
+        vec = [0.0] * _HASH_VEC_SIZE
+        text = text.lower().strip()
+        ngrams = [text[i:i + n] for i in range(max(1, len(text) - n + 1))]
+        if not ngrams:
+            return vec
+        weight = 1.0 / len(ngrams)
+        for ng in ngrams:
+            idx = hash(ng) % _HASH_VEC_SIZE
+            vec[idx] += weight
+        # L2 normalize
+        norm = math.sqrt(sum(x * x for x in vec))
+        if norm > 0:
+            vec = [x / norm for x in vec]
+        return vec
+
+    @staticmethod
+    def _jaccard_similarity(a: str, b: str) -> float:
+        """Word-level Jaccard as secondary check."""
+        sa = set(a.lower().split())
+        sb = set(b.lower().split())
+        if not sa or not sb:
+            return 0.0
+        return len(sa & sb) / len(sa | sb)
 
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -56,8 +111,12 @@ class SemanticDeduplicator:
         ts = alert.get("timestamp", 0)
 
         for prev_alert, prev_emb in self._recent:
-            if self._cosine_similarity(emb, prev_emb) <= self._threshold:
-                continue
+            cosine_sim = self._cosine_similarity(emb, prev_emb)
+            if cosine_sim <= self._threshold:
+                # Secondary check: Jaccard on text for stub mode
+                prev_text = f"{prev_alert.get('anomaly_type', '')} {prev_alert.get('description', '')}".strip()
+                if self._jaccard_similarity(text, prev_text) < 0.6:
+                    continue
             same_loc = cam == prev_alert.get("camera_id") or site == prev_alert.get("site_id")
             if same_loc and abs(ts - prev_alert.get("timestamp", 0)) <= 300:
                 self._duplicates_suppressed += 1

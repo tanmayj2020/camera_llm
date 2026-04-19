@@ -1,4 +1,7 @@
-"""Task 9: Causal Anomaly Understanding with VLM + Hallucination Guardrails."""
+"""Task 9: Causal Anomaly Understanding with VLM + Hallucination Guardrails.
+
+VLM: Gemini 2.5 Pro (SOTA multimodal reasoning, 2025) with structured JSON output.
+"""
 
 import base64
 import json
@@ -22,10 +25,11 @@ class CausalAnalysis:
 class CausalUnderstander:
     """Generates causal explanations for anomalies using VLM with hallucination guardrails.
 
+    Uses Gemini 2.5 Pro with structured JSON output mode for reliable parsing.
     Pipeline: anomaly → VLM analysis → claim extraction → evidence verification → grounded output.
     """
 
-    def __init__(self, model: str = "gemini-2.0-flash"):
+    def __init__(self, model: str = "gemini-2.5-pro"):
         self.model = model
         self._client = None
 
@@ -33,7 +37,13 @@ class CausalUnderstander:
         if self._client is None:
             try:
                 import google.generativeai as genai
-                self._client = genai.GenerativeModel(self.model)
+                self._client = genai.GenerativeModel(
+                    self.model,
+                    generation_config=genai.GenerationConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2,  # Low temperature for factual analysis
+                    ),
+                )
             except Exception as e:
                 logger.warning("Gemini init failed: %s — using stub", e)
                 self._client = "stub"

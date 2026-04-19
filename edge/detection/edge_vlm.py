@@ -1,6 +1,6 @@
 """Lightweight VLM on edge device — sub-second scene descriptions without cloud.
 
-Loads small model (InternVL-2B or similar). Offline VLM reasoning.
+Priority: Qwen2.5-VL-3B (SOTA small VLM, 2025) → InternVL3-2B → InternVL2-2B fallback.
 EdgeVLMScheduler runs checks on interval or when anomaly score spikes.
 """
 
@@ -28,30 +28,70 @@ class SceneDescription:
 
 
 class EdgeVLM:
-    """Lightweight VLM for edge inference — loads small model with lazy init."""
+    """Lightweight VLM for edge inference — Qwen2.5-VL-3B (SOTA small VLM).
 
-    def __init__(self, model_name: str = "OpenGVLab/InternVL2-2B"):
+    Qwen2.5-VL-3B outperforms InternVL2-2B on scene understanding benchmarks
+    while supporting dynamic resolution and video frame understanding.
+    """
+
+    # Ordered by preference
+    _MODEL_CHAIN = [
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        "OpenGVLab/InternVL3-2B",
+        "OpenGVLab/InternVL2-2B",
+    ]
+
+    def __init__(self, model_name: str | None = None):
         self._model_name = model_name
         self._model = None
-        self._tokenizer = None
+        self._processor = None
         self._available = None
+        self._backend = "none"  # "qwen2vl" | "internvl" | "none"
 
     def _load(self) -> bool:
         if self._available is not None:
             return self._available
-        try:
-            from transformers import AutoModel, AutoTokenizer
-            logger.info("Loading edge VLM: %s", self._model_name)
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._model_name, trust_remote_code=True)
-            self._model = AutoModel.from_pretrained(
-                self._model_name, trust_remote_code=True).eval()
-            self._available = True
-            logger.info("Edge VLM loaded successfully")
-        except Exception as e:
-            logger.warning("Edge VLM unavailable: %s — using stub", e)
-            self._available = False
-        return self._available
+
+        models_to_try = [self._model_name] if self._model_name else self._MODEL_CHAIN
+
+        for model_id in models_to_try:
+            if model_id is None:
+                continue
+            try:
+                if "qwen2" in model_id.lower() or "qwen2.5" in model_id.lower():
+                    self._load_qwen2vl(model_id)
+                else:
+                    self._load_internvl(model_id)
+                self._available = True
+                logger.info("Edge VLM loaded: %s (backend=%s)", model_id, self._backend)
+                return True
+            except Exception as e:
+                logger.info("Edge VLM %s failed: %s", model_id, e)
+                continue
+
+        logger.warning("No edge VLM available — using stub")
+        self._available = False
+        return False
+
+    def _load_qwen2vl(self, model_id: str):
+        """Load Qwen2.5-VL with proper processor."""
+        from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+        self._processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        self._model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype="auto", device_map="auto", trust_remote_code=True
+        ).eval()
+        self._model_name = model_id
+        self._backend = "qwen2vl"
+
+    def _load_internvl(self, model_id: str):
+        """Load InternVL with AutoModel."""
+        from transformers import AutoModel, AutoTokenizer
+        self._processor = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        self._model = AutoModel.from_pretrained(
+            model_id, trust_remote_code=True
+        ).eval()
+        self._model_name = model_id
+        self._backend = "internvl"
 
     def describe_scene(self, frame: np.ndarray, camera_id: str = "",
                        prompt: str = "Describe what you see in this CCTV frame. "
@@ -66,25 +106,49 @@ class EdgeVLM:
             img = Image.fromarray(frame if frame.dtype == np.uint8 else
                                   (frame * 255).astype(np.uint8))
 
-            # Model-specific inference
-            if hasattr(self._model, 'chat'):
-                response = self._model.chat(self._tokenizer, img, prompt)
+            if self._backend == "qwen2vl":
+                response = self._infer_qwen2vl(img, prompt)
+            elif self._backend == "internvl":
+                response = self._infer_internvl(img, prompt)
             else:
-                # Generic transformers pipeline fallback
-                inputs = self._tokenizer(prompt, return_tensors="pt")
-                outputs = self._model.generate(**inputs, max_new_tokens=150)
-                response = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+                return self._stub_description(frame, camera_id, t0)
 
             latency = (time.time() - t0) * 1000
             return SceneDescription(
                 timestamp=time.time(), camera_id=camera_id,
-                description=response, confidence=0.7, latency_ms=latency,
+                description=response, confidence=0.8, latency_ms=latency,
                 objects_mentioned=self._extract_objects(response),
                 anomaly_hints=self._extract_anomalies(response),
             )
         except Exception as e:
             logger.error("Edge VLM inference failed: %s", e)
             return self._stub_description(frame, camera_id, t0)
+
+    def _infer_qwen2vl(self, img, prompt: str) -> str:
+        """Qwen2.5-VL inference with proper message format."""
+        import torch
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": img},
+            {"type": "text", "text": prompt},
+        ]}]
+        text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self._processor(text=[text], images=[img], return_tensors="pt", padding=True)
+        inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            output_ids = self._model.generate(**inputs, max_new_tokens=200)
+        # Decode only generated tokens
+        generated = output_ids[0][inputs["input_ids"].shape[1]:]
+        return self._processor.decode(generated, skip_special_tokens=True)
+
+    def _infer_internvl(self, img, prompt: str) -> str:
+        """InternVL inference."""
+        if hasattr(self._model, 'chat'):
+            return self._model.chat(self._processor, img, prompt)
+        import torch
+        inputs = self._processor(prompt, return_tensors="pt")
+        with torch.no_grad():
+            outputs = self._model.generate(**inputs, max_new_tokens=200)
+        return self._processor.decode(outputs[0], skip_special_tokens=True)
 
     def _stub_description(self, frame: np.ndarray, camera_id: str, t0: float) -> SceneDescription:
         return SceneDescription(

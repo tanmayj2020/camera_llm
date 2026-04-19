@@ -1,9 +1,11 @@
 """Behavioral intent recognition — pre-incident detection from pose + trajectory analysis.
 
 Detects: casing, nervous pacing, evasive movement, aggressive approach.
+Includes learned PoseSequenceClassifier (1D-CNN) to boost heuristic confidence.
 Optional VLM deep analysis for ambiguous cases.
 """
 
+import json
 import logging
 import math
 import time
@@ -12,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import numpy as np
+import torch
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
@@ -38,24 +42,92 @@ class _TrajectoryBuffer:
     positions: deque = field(default_factory=lambda: deque(maxlen=120))  # ~2 min at 1Hz
     timestamps: deque = field(default_factory=lambda: deque(maxlen=120))
     head_angles: deque = field(default_factory=lambda: deque(maxlen=60))  # from pose
+    pose_keypoints: deque = field(default_factory=lambda: deque(maxlen=30))  # for CNN
+
+
+class PoseSequenceClassifier(nn.Module):
+    """1D-CNN over pose keypoint sequences for intent classification.
+
+    Input: (batch, 30, 17*3=51) — 30 frames of 17 COCO keypoints with (x,y,conf).
+    Output: (batch, 5) — probabilities for [normal, casing, pacing, evasive, aggressive].
+    """
+
+    INTENT_CLASSES = ["normal", "casing", "nervous_pacing", "evasive_movement", "aggressive_approach"]
+
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(51, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.fc = nn.Linear(64, len(self.INTENT_CLASSES))
+        self._available = True
+        self.eval()
+
+    @torch.no_grad()
+    def classify(self, pose_sequence: list[list]) -> dict[str, float] | None:
+        """Classify a sequence of pose keypoints.
+
+        Args:
+            pose_sequence: list of 30 frames, each frame is list of 17 keypoints [x,y,conf]
+        Returns:
+            dict mapping intent name to probability, or None if insufficient data
+        """
+        if len(pose_sequence) < 15:
+            return None
+        try:
+            # Pad/trim to 30 frames
+            seq = list(pose_sequence)[-30:]
+            while len(seq) < 30:
+                seq.insert(0, seq[0])
+
+            # Flatten keypoints: (30, 17, 3) → (30, 51)
+            flat = []
+            for frame_kpts in seq:
+                frame_flat = []
+                for kp in frame_kpts[:17]:
+                    if isinstance(kp, (list, tuple)) and len(kp) >= 3:
+                        frame_flat.extend([kp[0], kp[1], kp[2]])
+                    else:
+                        frame_flat.extend([0.0, 0.0, 0.0])
+                while len(frame_flat) < 51:
+                    frame_flat.append(0.0)
+                flat.append(frame_flat[:51])
+
+            x = torch.tensor([flat], dtype=torch.float32)  # (1, 30, 51)
+            x = x.permute(0, 2, 1)  # (1, 51, 30) for Conv1d
+            logits = self.fc(self.conv(x).squeeze(-1))  # (1, 5)
+            probs = torch.softmax(logits, dim=-1).squeeze(0)
+            return {name: float(probs[i]) for i, name in enumerate(self.INTENT_CLASSES)}
+        except Exception as e:
+            logger.debug("PoseSequenceClassifier failed: %s", e)
+            return None
 
 
 class IntentRecognizer:
-    """Analyzes pose sequences + trajectories to detect pre-incident behavioral patterns."""
+    """Analyzes pose sequences + trajectories to detect pre-incident behavioral patterns.
+
+    Uses heuristic detectors + learned PoseSequenceClassifier (1D-CNN).
+    When both agree, confidence is boosted. When they disagree, conservative score used.
+    """
 
     # Thresholds
-    CASING_HEAD_SCAN_RANGE = 60.0       # degrees of head rotation indicating scanning
+    CASING_HEAD_SCAN_RANGE = 60.0
     CASING_MIN_STATIONARY_S = 5.0
     PACING_MIN_REVERSALS = 3
     PACING_MAX_AREA_M2 = 4.0
     EVASIVE_MIN_TURNS = 2
     EVASIVE_SPEED_VARIANCE = 0.5
-    AGGRESSIVE_MIN_SPEED = 2.0          # m/s
-    AGGRESSIVE_DIRECTNESS = 0.8         # ratio of displacement to path length
+    AGGRESSIVE_MIN_SPEED = 2.0
+    AGGRESSIVE_DIRECTNESS = 0.8
 
     def __init__(self):
         self._buffers: dict[str, _TrajectoryBuffer] = defaultdict(_TrajectoryBuffer)
         self._vlm_client = None
+        self._pose_classifier = PoseSequenceClassifier()
 
     def set_vlm_client(self, client):
         self._vlm_client = client
@@ -71,9 +143,13 @@ class IntentRecognizer:
             head_angle = self._estimate_head_angle(pose_keypoints)
             if head_angle is not None:
                 buf.head_angles.append(head_angle)
+            buf.pose_keypoints.append(pose_keypoints)
 
     def analyze(self, entity_id: str, target_entities: dict[str, np.ndarray] | None = None) -> IntentResult:
-        """Analyze trajectory buffer for behavioral intent."""
+        """Analyze trajectory buffer for behavioral intent.
+
+        Combines heuristic detectors with learned PoseSequenceClassifier.
+        """
         buf = self._buffers.get(entity_id)
         if not buf or len(buf.positions) < 10:
             return IntentResult(entity_id=entity_id, intent=IntentType.NORMAL,
@@ -82,32 +158,57 @@ class IntentRecognizer:
         positions = np.array(list(buf.positions))
         timestamps = np.array(list(buf.timestamps))
 
-        # Check each pattern
+        # Heuristic detection
         results = []
-
         casing = self._detect_casing(entity_id, positions, timestamps, buf.head_angles)
         if casing:
             results.append(casing)
-
         pacing = self._detect_pacing(entity_id, positions, timestamps)
         if pacing:
             results.append(pacing)
-
         evasive = self._detect_evasive(entity_id, positions, timestamps)
         if evasive:
             results.append(evasive)
-
         if target_entities:
             aggressive = self._detect_aggressive(entity_id, positions, timestamps, target_entities)
             if aggressive:
                 results.append(aggressive)
 
-        if not results:
-            return IntentResult(entity_id=entity_id, intent=IntentType.NORMAL,
-                                confidence=0.1, description="Normal movement pattern")
+        heuristic_best = max(results, key=lambda r: r.confidence) if results else None
 
-        # Return highest confidence
-        return max(results, key=lambda r: r.confidence)
+        # CNN-based classification from pose sequences
+        cnn_result = None
+        if buf.pose_keypoints and len(buf.pose_keypoints) >= 15:
+            cnn_probs = self._pose_classifier.classify(list(buf.pose_keypoints))
+            if cnn_probs:
+                best_class = max(cnn_probs, key=cnn_probs.get)
+                if best_class != "normal" and cnn_probs[best_class] > 0.3:
+                    try:
+                        cnn_result = IntentResult(
+                            entity_id=entity_id,
+                            intent=IntentType(best_class),
+                            confidence=cnn_probs[best_class],
+                            description=f"CNN: {best_class} (p={cnn_probs[best_class]:.2f})",
+                        )
+                    except ValueError:
+                        pass
+
+        # Fuse: if both agree, boost confidence; if disagree, use conservative
+        if heuristic_best and cnn_result:
+            if heuristic_best.intent == cnn_result.intent:
+                heuristic_best.confidence = min(0.98, heuristic_best.confidence * 1.3)
+                heuristic_best.description += " [CNN-confirmed]"
+                return heuristic_best
+            else:
+                # Disagree: return the one with lower confidence (conservative)
+                return min([heuristic_best, cnn_result], key=lambda r: r.confidence)
+        elif heuristic_best:
+            return heuristic_best
+        elif cnn_result:
+            return cnn_result
+
+        return IntentResult(entity_id=entity_id, intent=IntentType.NORMAL,
+                            confidence=0.1, description="Normal movement pattern")
 
     def _detect_casing(self, entity_id: str, positions: np.ndarray,
                        timestamps: np.ndarray, head_angles: deque) -> IntentResult | None:

@@ -22,7 +22,7 @@ def _dist(a, b) -> float:
 
 
 class SocialForceModel:
-    """Computes repulsive social forces between pedestrians."""
+    """Computes repulsive social forces, obstacle repulsion, and goal attraction."""
 
     def compute_forces(self, spatial) -> dict[str, np.ndarray]:
         persons = _persons(spatial)
@@ -39,6 +39,83 @@ class SocialForceModel:
                     forces[a_id] += mag * direction
                     forces[b_id] -= mag * direction
         return forces
+
+    def compute_obstacle_forces(self, spatial) -> dict[str, np.ndarray]:
+        """Repulsive forces from zone boundaries (obstacles/walls)."""
+        persons = _persons(spatial)
+        forces: dict[str, np.ndarray] = {k: np.zeros(3) for k in persons}
+        zones = getattr(spatial, "_zones", {})
+        for pid, person in persons.items():
+            pos2d = np.array([person.position[0], person.position[2]])
+            for zone in zones.values():
+                for i in range(len(zone.polygon)):
+                    a = np.array(zone.polygon[i])
+                    b = np.array(zone.polygon[(i + 1) % len(zone.polygon)])
+                    # Point-to-segment distance
+                    ab = b - a
+                    seg_len_sq = np.dot(ab, ab)
+                    if seg_len_sq < 1e-6:
+                        continue
+                    t = np.clip(np.dot(pos2d - a, ab) / seg_len_sq, 0, 1)
+                    closest = a + t * ab
+                    diff = pos2d - closest
+                    d = float(np.linalg.norm(diff))
+                    if 0 < d < 2.0:
+                        direction = diff / d
+                        mag = REPULSION_STRENGTH * 0.5 * np.exp(-d / REPULSION_RANGE)
+                        forces[pid][:2] += mag * direction[:2] if len(direction) >= 2 else 0
+        return forces
+
+    def compute_goal_forces(self, spatial) -> dict[str, np.ndarray]:
+        """Attractive forces toward inferred goal (velocity direction extrapolation)."""
+        persons = _persons(spatial)
+        forces: dict[str, np.ndarray] = {k: np.zeros(3) for k in persons}
+        GOAL_STRENGTH = 1.0
+        DESIRED_SPEED = 1.3  # m/s typical walking speed
+        for pid, person in persons.items():
+            speed = float(np.linalg.norm(person.velocity))
+            if speed > 0.1:
+                desired_dir = person.velocity / speed
+                forces[pid] = GOAL_STRENGTH * (DESIRED_SPEED * desired_dir - person.velocity)
+        return forces
+
+
+class LaneDetector:
+    """Detects counter-flow lanes from velocity clustering."""
+
+    def detect_lanes(self, spatial, min_lane_size: int = 3) -> list[dict]:
+        persons = _persons(spatial)
+        if len(persons) < 4:
+            return []
+        ids = list(persons.keys())
+        velocities = np.array([persons[k].velocity[:2] for k in ids])
+        speeds = np.linalg.norm(velocities, axis=1)
+        moving = speeds > 0.3
+        if moving.sum() < 4:
+            return []
+
+        # Cluster by velocity angle into 2 dominant directions
+        angles = np.arctan2(velocities[moving, 1], velocities[moving, 0])
+        moving_ids = [ids[i] for i in range(len(ids)) if moving[i]]
+
+        # Simple 2-cluster: positive vs negative primary direction
+        median_angle = np.median(angles)
+        lane_a = [mid for mid, a in zip(moving_ids, angles) if a >= median_angle]
+        lane_b = [mid for mid, a in zip(moving_ids, angles) if a < median_angle]
+
+        lanes = []
+        for i, members in enumerate([lane_a, lane_b]):
+            if len(members) >= min_lane_size:
+                positions = np.array([persons[m].position for m in members])
+                vels = np.array([persons[m].velocity for m in members])
+                lanes.append({
+                    "lane_id": f"lane_{i}",
+                    "members": members,
+                    "centroid": np.mean(positions, axis=0).tolist(),
+                    "avg_velocity": np.mean(vels, axis=0).tolist(),
+                    "size": len(members),
+                })
+        return lanes
 
 
 class GroupDetector:
@@ -151,9 +228,11 @@ class CrowdPressureMonitor:
 
 
 def analyze_crowd(spatial) -> dict[str, Any]:
-    """Combined crowd analysis: forces, groups, pressure."""
+    """Combined crowd analysis: forces, groups, pressure, lanes."""
     sfm = SocialForceModel()
     forces = sfm.compute_forces(spatial)
+    obstacle_forces = sfm.compute_obstacle_forces(spatial)
+    goal_forces = sfm.compute_goal_forces(spatial)
     force_summary = {k: float(np.linalg.norm(v)) for k, v in forces.items()}
 
     gd = GroupDetector()
@@ -162,4 +241,14 @@ def analyze_crowd(spatial) -> dict[str, Any]:
     cpm = CrowdPressureMonitor()
     pressure = cpm.compute_pressure(spatial)
 
-    return {"forces": force_summary, "groups": groups, "pressure": pressure}
+    ld = LaneDetector()
+    lanes = ld.detect_lanes(spatial)
+
+    return {
+        "forces": force_summary,
+        "obstacle_forces": {k: float(np.linalg.norm(v)) for k, v in obstacle_forces.items()},
+        "goal_forces": {k: float(np.linalg.norm(v)) for k, v in goal_forces.items()},
+        "groups": groups,
+        "pressure": pressure,
+        "lanes": lanes,
+    }

@@ -78,6 +78,7 @@ def get_query_engine():
         from services.query_engine.engine import MultiAgentQueryEngine
         _services["query"] = MultiAgentQueryEngine(
             kg=get_kg(), spatial=get_spatial(), vlm_client=get_causal(),
+            rag=get_hypergraph_rag(),
         )
     return _services["query"]
 
@@ -488,6 +489,86 @@ def get_federated_intel():
     return _services["federation"]
 
 
+def get_reid_embedder():
+    if "reid" not in _services:
+        from services.cross_camera.reid_embedder import ReIDEmbedder
+        _services["reid"] = ReIDEmbedder()
+    return _services["reid"]
+
+
+def get_nl_rule_compiler():
+    if "nl_compiler" not in _services:
+        from services.nl_rule_compiler.compiler import NLRuleCompiler
+        _services["nl_compiler"] = NLRuleCompiler(
+            vlm_client=get_causal(), reasoner=get_reasoner(),
+        )
+    return _services["nl_compiler"]
+
+
+def get_ambient_score():
+    if "ambient" not in _services:
+        from services.ambient_score.engine import AmbientIntelligenceEngine
+        _services["ambient"] = AmbientIntelligenceEngine(
+            spatial=get_spatial(), baseline=get_baseline(),
+            dwell_analyzer=get_dwell_analyzer(),
+            contextual_normality=get_contextual_normality(),
+            scene_graph=get_scene_graph(),
+            world_model=get_world_model(),
+            stress_detector=get_stress_detector(),
+        )
+    return _services["ambient"]
+
+
+def get_predictive_interceptor():
+    if "interceptor" not in _services:
+        from services.predictive_interception.interceptor import PredictiveInterceptor
+        _services["interceptor"] = PredictiveInterceptor(
+            world_model=get_world_model(), spatial=get_spatial(),
+            floor_plan=get_floor_plan(),
+        )
+    return _services["interceptor"]
+
+
+def get_gait_dna():
+    if "gait" not in _services:
+        from services.gait_dna.engine import GaitDNAEngine
+        _services["gait"] = GaitDNAEngine()
+    return _services["gait"]
+
+
+def get_contagion_network():
+    if "contagion" not in _services:
+        from services.contagion.network import AnomalyContagionNetwork
+        _services["contagion"] = AnomalyContagionNetwork()
+    return _services["contagion"]
+
+
+def get_deja_vu():
+    if "deja_vu" not in _services:
+        from services.deja_vu.engine import DejaVuEngine
+        _services["deja_vu"] = DejaVuEngine()
+    return _services["deja_vu"]
+
+
+def get_cross_camera_tracker():
+    if "cross_cam" not in _services:
+        from services.cross_camera.tracker import CrossCameraTracker
+        _services["cross_cam"] = CrossCameraTracker(kg=get_kg())
+    return _services["cross_cam"]
+
+
+def get_hypergraph_rag():
+    if "hgrag" not in _services:
+        from services.knowledge_graph.hypergraph_rag import HyperGraphRAG
+        _services["hgrag"] = HyperGraphRAG(
+            qdrant_host=os.getenv("QDRANT_HOST", "localhost"),
+            qdrant_port=int(os.getenv("QDRANT_PORT", "6333")),
+            collection=os.getenv("QDRANT_COLLECTION", "visionbrain-keyframes"),
+            neo4j_driver=get_kg()._driver if get_kg() else None,
+        )
+    return _services["hgrag"]
+
+
 # --- Auth dependency ---
 try:
     from services.auth.middleware import get_current_tenant
@@ -723,6 +804,33 @@ async def ingest_event(payload: EventPayload):
     except Exception:
         pass
 
+    # 3b-ii. Re-ID embeddings + cross-camera tracking
+    if event.get("keyframe_b64"):
+        try:
+            reid = get_reid_embedder()
+            xtracker = get_cross_camera_tracker()
+            for obj in event.get("objects", []):
+                if obj.get("class_name") == "person" and obj.get("bbox"):
+                    emb = reid.extract(event["keyframe_b64"], obj["bbox"])
+                    if emb is not None:
+                        import numpy as _np
+                        xtracker.match_across_cameras(
+                            str(obj["track_id"]), event["camera_id"], _np.array(emb))
+        except Exception:
+            pass
+
+    # 3b-iii. HyperGraphRAG event indexing
+    if event.get("keyframe_b64"):
+        try:
+            entity_ids = [str(o.get("track_id", "")) for o in event.get("objects", []) if o.get("track_id", -1) >= 0]
+            get_hypergraph_rag().index_event(
+                event["event_id"], event["camera_id"], event["timestamp"],
+                event["keyframe_b64"],
+                f"{len(event.get('objects', []))} objects detected",
+                entity_ids)
+        except Exception:
+            pass
+
     # 3c. Safety evaluation
     scene_state = {
         "objects": event.get("objects", []),
@@ -737,6 +845,10 @@ async def ingest_event(payload: EventPayload):
         safety_alerts = get_safety_monitor().evaluate(scene_state)
         for sa in (safety_alerts or []):
             await broadcast_alert({"type": "safety_alert", "alert": sa})
+            try:
+                get_event_bus().publish("safety_alert", sa)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -744,7 +856,12 @@ async def ingest_event(payload: EventPayload):
     for obj in event.get("objects", []):
         if obj.get("class_name", "").lower() in ("car", "truck", "bus", "vehicle"):
             try:
-                get_lpr().recognize(obj, event.get("keyframe_b64"), event["camera_id"], event["timestamp"])
+                from services.lpr.recognizer import crop_vehicle_from_keyframe
+                crop_b64 = crop_vehicle_from_keyframe(
+                    event.get("keyframe_b64", ""), obj.get("bbox", [])) if event.get("keyframe_b64") else None
+                if crop_b64:
+                    get_lpr().recognize(crop_b64, event["camera_id"],
+                                        str(obj.get("track_id", "")), event["timestamp"])
             except Exception:
                 pass
 
@@ -786,6 +903,10 @@ async def ingest_event(payload: EventPayload):
         tailgate_events = get_tailgate_detector().evaluate(scene_state)
         for te in tailgate_events:
             await broadcast_alert({"type": "tailgate_alert", "alert": te.__dict__})
+            try:
+                get_event_bus().publish("tailgate_alert", te.__dict__)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -813,6 +934,10 @@ async def ingest_event(payload: EventPayload):
         proactive_insights = get_proactive_agent().evaluate(scene_state)
         for pi in proactive_insights:
             await broadcast_alert({"type": "proactive_insight", "insight": pi.__dict__})
+            try:
+                get_event_bus().publish("proactive_insight", pi.__dict__)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -825,6 +950,10 @@ async def ingest_event(payload: EventPayload):
                     logger.info("AV fusion contradicted: %s", avr.description)
                 elif avr.correlation_type == "confirmed":
                     await broadcast_alert({"type": "av_confirmed", "correlation": avr.__dict__})
+                    try:
+                        get_event_bus().publish("av_confirmed", avr.__dict__)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -835,6 +964,10 @@ async def ingest_event(payload: EventPayload):
         deg_alerts = get_adversarial_monitor().evaluate(event["camera_id"], det_count, frame_hash)
         for da in deg_alerts:
             await broadcast_alert({"type": "degradation_alert", "alert": da.__dict__})
+            try:
+                get_event_bus().publish("degradation_alert", da.__dict__)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -847,10 +980,70 @@ async def ingest_event(payload: EventPayload):
         pass
 
     # 3o. Behavioral stress detection
+    # 3o. Behavioral stress detection
     try:
         stress_results = get_stress_detector().evaluate(scene_state)
         for sa in stress_results:
             await broadcast_alert({"type": "stress_assessment", "assessment": sa.__dict__})
+            try:
+                get_event_bus().publish("stress_assessment", sa.__dict__)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 3p. Gait DNA observation
+    try:
+        gait = get_gait_dna()
+        for eid, ent in spatial._entities.items():
+            pos = ent.position
+            vel = getattr(ent, "velocity", [0, 0])
+            pose_kps = None
+            for obj in event.get("objects", []):
+                if str(obj.get("track_id")) == str(eid) and obj.get("keypoints"):
+                    pose_kps = obj["keypoints"]
+            gait.observe(str(eid), float(pos[0]), float(pos[1]),
+                         float(vel[0]) if len(vel) > 0 else 0.0,
+                         float(vel[1]) if len(vel) > 1 else 0.0,
+                         event["timestamp"], pose_kps)
+            # Check for cross-session matches
+            match = gait.identify_across_sessions(str(eid))
+            if match and match.similarity > 0.85:
+                await broadcast_alert({
+                    "type": "gait_reidentification",
+                    "current_entity": str(eid),
+                    "matched_entity": match.matched_entity_id,
+                    "similarity": match.similarity,
+                })
+    except Exception:
+        pass
+
+    # 3q. Predictive path interception
+    try:
+        intercept_alerts = get_predictive_interceptor().evaluate(scene_state)
+        for ia in intercept_alerts:
+            await broadcast_alert({
+                "type": "predictive_interception",
+                "entity": ia.entity_id,
+                "target_zone": ia.target_zone_name,
+                "eta_seconds": ia.estimated_arrival_s,
+                "confidence": ia.confidence,
+                "recommendation": ia.recommendation,
+            })
+            try:
+                get_event_bus().publish("predictive_interception", {
+                    "entity": ia.entity_id, "zone": ia.target_zone_id,
+                    "eta": ia.estimated_arrival_s, "confidence": ia.confidence})
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 3r. Scene déjà vu encoding
+    try:
+        get_deja_vu().encode_and_store(
+            scene_state, event_type=event.get("event_type", ""),
+            zone_id=event.get("zone_id", ""))
     except Exception:
         pass
 
@@ -880,6 +1073,12 @@ async def ingest_event(payload: EventPayload):
             "camera_id": event["camera_id"],
             "details": divergence.details,
         })
+        try:
+            get_event_bus().publish("prediction_divergence", {
+                "score": divergence.overall, "camera_id": event["camera_id"],
+                "details": divergence.details})
+        except Exception:
+            pass
 
     # 6. Process triggered rules → causal analysis → action engine
     alerts_sent = []
@@ -957,14 +1156,74 @@ async def ingest_event(payload: EventPayload):
     for pred in predictions:
         await broadcast_alert({"type": "prediction", "prediction": pred.__dict__})
 
+    # 8. Ambient Intelligence Score
+    ambient_score = None
+    try:
+        zone_id = event.get("zone_id", event["camera_id"])
+        ambient = get_ambient_score().compute(zone_id, scene_state)
+        ambient_score = ambient.score
+        if ambient.level in ("warning", "critical"):
+            await broadcast_alert({
+                "type": "ambient_score",
+                "zone_id": zone_id,
+                "score": ambient.score,
+                "level": ambient.level,
+                "top_driver": ambient.top_driver,
+            })
+    except Exception:
+        pass
+
+    # 9. Anomaly contagion prediction (when alerts fired)
+    if rule_results:
+        try:
+            contagion = get_contagion_network()
+            zone_id = event.get("zone_id", event["camera_id"])
+            for rr in rule_results:
+                contagion.record_event(zone_id, rr.rule_name, event["timestamp"])
+            warnings = contagion.predict_contagion(zone_id, rule_results[0].rule_name)
+            for w in warnings[:3]:
+                await broadcast_alert({
+                    "type": "contagion_warning",
+                    "at_risk_zone": w.zone_id,
+                    "probability": w.risk_probability,
+                    "expected_delay_s": w.expected_delay_s,
+                    "source_zone": w.source_zone,
+                    "recommendation": w.recommendation,
+                })
+        except Exception:
+            pass
+
+    # 10. Scene déjà vu detection (when anomaly detected)
+    deja_vu_matches = []
+    if rule_results:
+        try:
+            matches = get_deja_vu().find_similar(scene_state, top_k=3)
+            for m in matches:
+                deja_vu_matches.append({
+                    "similarity": m.similarity,
+                    "historical_time": m.historical_timestamp,
+                    "narrative": m.narrative,
+                })
+                if m.similarity > 0.85:
+                    await broadcast_alert({
+                        "type": "deja_vu",
+                        "similarity": m.similarity,
+                        "narrative": m.narrative,
+                        "historical_event": m.historical_event_type,
+                    })
+        except Exception:
+            pass
+
     return {
         "status": "ok",
         "anomaly_score": anomaly_score,
+        "ambient_score": ambient_score,
         "prediction_divergence": divergence.overall,
         "rules_triggered": len(rule_results),
         "tracker_alerts": len(tracker_alerts),
         "predictions": len(predictions),
         "alerts_sent": len(alerts_sent),
+        "deja_vu_matches": len(deja_vu_matches),
     }
 
 
@@ -1055,6 +1314,28 @@ async def acknowledge_alert(event_id: str):
 @app.get("/api/graph/{camera_id}/recent")
 async def get_recent_graph(camera_id: str, limit: int = 50):
     return get_kg().get_recent_events(camera_id, limit)
+
+
+@app.get("/api/graph/journey/{track_id}")
+async def get_entity_journey(track_id: str, since_hours: int = 24):
+    """Temporal path: trace entity's full journey across cameras with transit times."""
+    return get_kg().get_entity_journey(track_id, since_hours)
+
+
+@app.get("/api/graph/path/{track_id}")
+async def get_temporal_path(track_id: str, start: float = 0, end: float = 0):
+    """Query: where was entity X between time A and time B?"""
+    if end == 0:
+        end = time.time()
+    if start == 0:
+        start = end - 3600
+    return get_kg().get_temporal_path(track_id, start, end)
+
+
+@app.get("/api/graph/causal/{event_id}")
+async def get_causal_chain(event_id: str, depth: int = 5):
+    """Follow causal/temporal edges to build event chain."""
+    return get_kg().get_causal_chain(event_id, depth)
 
 
 # --- Custom Trackers ---
@@ -1707,6 +1988,247 @@ async def check_federation_entity(entity_id: str):
 @app.get("/api/federation/status")
 async def get_federation_status():
     return get_federated_intel().get_federation_status()
+
+
+# --- Natural Language Rule Compiler ---
+
+class NLRuleRequest(BaseModel):
+    instruction: str
+
+
+class RuleToggleRequest(BaseModel):
+    active: bool
+
+
+@app.post("/api/nl-rules/compile")
+async def compile_nl_rule(req: NLRuleRequest):
+    """Compile a natural language instruction into a live detection rule."""
+    compiled = get_nl_rule_compiler().compile(req.instruction)
+    return {
+        "rule_id": compiled.rule_id,
+        "name": compiled.name,
+        "severity": compiled.severity,
+        "conditions": compiled.conditions,
+        "description": compiled.description,
+        "source_text": compiled.source_text,
+    }
+
+
+@app.get("/api/nl-rules")
+async def list_nl_rules():
+    return get_nl_rule_compiler().list_rules()
+
+
+@app.delete("/api/nl-rules/{rule_id}")
+async def delete_nl_rule(rule_id: str):
+    ok = get_nl_rule_compiler().delete_rule(rule_id)
+    if not ok:
+        raise HTTPException(404, "Rule not found")
+    return {"status": "deleted"}
+
+
+@app.patch("/api/nl-rules/{rule_id}/toggle")
+async def toggle_nl_rule(rule_id: str, req: RuleToggleRequest):
+    ok = get_nl_rule_compiler().toggle_rule(rule_id, req.active)
+    if not ok:
+        raise HTTPException(404, "Rule not found")
+    return {"status": "ok", "active": req.active}
+
+
+@app.get("/api/nl-rules/{rule_id}/explain")
+async def explain_nl_rule(rule_id: str):
+    return {"explanation": get_nl_rule_compiler().explain_rule(rule_id)}
+
+
+# --- Ambient Intelligence Score ---
+
+@app.get("/api/ambient/{zone_id}")
+async def get_ambient_zone_score(zone_id: str):
+    """Get the fused multi-modal safety score for a zone."""
+    spatial = get_spatial()
+    scene_state = {
+        "objects": [{"class_name": e.class_name, "bbox": e.bbox.tolist() if hasattr(e.bbox, 'tolist') else e.bbox,
+                     "track_id": eid}
+                    for eid, e in spatial._entities.items()],
+        "audio_events": [],
+        "timestamp": time.time(),
+        "camera_id": zone_id,
+    }
+    result = get_ambient_score().compute(zone_id, scene_state)
+    return {
+        "zone_id": result.zone_id,
+        "score": result.score,
+        "level": result.level,
+        "top_driver": result.top_driver,
+        "contributions": [
+            {"signal": c.signal_name, "value": round(c.raw_value, 3),
+             "weight": round(c.weight, 3), "description": c.description}
+            for c in result.contributions
+        ],
+    }
+
+
+@app.get("/api/ambient/{zone_id}/trend")
+async def get_ambient_trend(zone_id: str, minutes: int = 30):
+    return get_ambient_score().get_trend(zone_id, minutes)
+
+
+@app.get("/api/ambient")
+async def get_all_ambient_scores():
+    """Get ambient scores for all active zones."""
+    spatial = get_spatial()
+    zones = list(getattr(spatial, "_zones", {}).keys())
+    if not zones:
+        zones = ["default"]
+    results = []
+    for zone_id in zones:
+        try:
+            scene_state = {
+                "objects": [{"class_name": e.class_name, "bbox": [],
+                             "track_id": eid}
+                            for eid, e in spatial._entities.items()],
+                "audio_events": [], "timestamp": time.time(),
+                "camera_id": zone_id,
+            }
+            result = get_ambient_score().compute(zone_id, scene_state)
+            results.append({
+                "zone_id": result.zone_id, "score": result.score,
+                "level": result.level, "top_driver": result.top_driver,
+            })
+        except Exception:
+            pass
+    return results
+
+
+# --- Predictive Path Interception ---
+
+@app.get("/api/interception/active")
+async def get_active_interceptions():
+    """Get current predictive interception alerts."""
+    scene_state = {
+        "objects": [], "audio_events": [],
+        "timestamp": time.time(), "camera_id": "all",
+    }
+    alerts = get_predictive_interceptor().evaluate(scene_state)
+    return [
+        {
+            "entity_id": a.entity_id,
+            "target_zone": a.target_zone_name,
+            "eta_seconds": a.estimated_arrival_s,
+            "confidence": a.confidence,
+            "recommendation": a.recommendation,
+            "current_position": a.current_position,
+            "predicted_entry": a.predicted_entry_point,
+        }
+        for a in alerts
+    ]
+
+
+@app.get("/api/interception/trajectories")
+async def get_predicted_trajectories():
+    """Get all predicted trajectories for floor plan overlay."""
+    return get_predictive_interceptor().get_all_trajectories()
+
+
+# --- Gait DNA (Behavioral Biometrics) ---
+
+@app.get("/api/gait/gallery")
+async def get_gait_gallery():
+    """List all stored gait fingerprints."""
+    return get_gait_dna().get_gallery_summary()
+
+
+@app.get("/api/gait/{entity_id}")
+async def get_gait_fingerprint(entity_id: str):
+    fp = get_gait_dna().get_fingerprint(entity_id)
+    if not fp:
+        raise HTTPException(404, "No fingerprint for this entity")
+    return {
+        "entity_id": fp.entity_id,
+        "confidence": round(fp.confidence, 2),
+        "observations": fp.observation_count,
+        "first_seen": fp.first_seen,
+        "last_updated": fp.last_updated,
+    }
+
+
+@app.get("/api/gait/{entity_id}/match")
+async def match_gait(entity_id: str):
+    """Find entities with similar movement patterns (cross-session re-ID)."""
+    matches = get_gait_dna().match(entity_id)
+    return [
+        {
+            "matched_entity": m.matched_entity_id,
+            "similarity": m.similarity,
+            "match_type": m.match_type,
+        }
+        for m in matches
+    ]
+
+
+# --- Anomaly Contagion Network ---
+
+@app.get("/api/contagion/graph")
+async def get_contagion_graph():
+    """Get the full zone-to-zone anomaly propagation graph."""
+    return get_contagion_network().get_graph()
+
+
+@app.get("/api/contagion/{zone_id}/predict")
+async def predict_zone_contagion(zone_id: str):
+    """Predict which zones are at risk after an event in this zone."""
+    warnings = get_contagion_network().predict_contagion(zone_id)
+    return [
+        {
+            "zone_id": w.zone_id,
+            "zone_name": w.zone_name,
+            "probability": w.risk_probability,
+            "expected_delay_s": w.expected_delay_s,
+            "recommendation": w.recommendation,
+        }
+        for w in warnings
+    ]
+
+
+@app.get("/api/contagion/{zone_id}/profile")
+async def get_contagion_profile(zone_id: str):
+    """Get incoming and outgoing risk profile for a zone."""
+    return get_contagion_network().get_zone_risk_profile(zone_id)
+
+
+# --- Scene Déjà Vu ---
+
+@app.get("/api/deja-vu/{camera_id}")
+async def find_deja_vu(camera_id: str, min_similarity: float = 0.7,
+                       top_k: int = 5, same_camera: bool = False):
+    """Find historical scenes similar to the current one."""
+    spatial = get_spatial()
+    scene_state = {
+        "objects": [{"class_name": e.class_name, "bbox": e.bbox.tolist() if hasattr(e.bbox, 'tolist') else e.bbox,
+                     "track_id": eid}
+                    for eid, e in spatial._entities.items()],
+        "audio_events": [], "timestamp": time.time(),
+        "camera_id": camera_id,
+    }
+    matches = get_deja_vu().find_similar(
+        scene_state, top_k=top_k, same_camera_only=same_camera,
+        min_similarity=min_similarity)
+    return [
+        {
+            "similarity": m.similarity,
+            "historical_camera": m.historical_camera_id,
+            "historical_time": m.historical_timestamp,
+            "historical_event": m.historical_event_type,
+            "narrative": m.narrative,
+            "time_ago_hours": m.time_ago_hours,
+        }
+        for m in matches
+    ]
+
+
+@app.get("/api/deja-vu/stats")
+async def get_deja_vu_stats():
+    return get_deja_vu().get_stats()
 
 
 # --- WebSocket ---

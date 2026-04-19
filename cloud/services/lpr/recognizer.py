@@ -1,5 +1,7 @@
 """License plate recognition via VLM."""
 
+import base64
+import io
 import json
 import logging
 import time
@@ -7,6 +9,29 @@ from collections import deque
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+def crop_vehicle_from_keyframe(keyframe_b64: str, bbox: list[float]) -> str | None:
+    """Extract vehicle crop from full keyframe as base64 JPEG."""
+    try:
+        import cv2
+        import numpy as np
+        img_bytes = base64.b64decode(keyframe_b64)
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+        x1, y1, x2, y2 = [int(c) for c in bbox]
+        h, w = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 - x1 < 20 or y2 - y1 < 20:
+            return None
+        crop = frame[y1:y2, x1:x2]
+        _, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        return base64.b64encode(buf.tobytes()).decode()
+    except Exception:
+        return None
 
 
 @dataclass

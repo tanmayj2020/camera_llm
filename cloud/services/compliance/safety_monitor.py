@@ -42,11 +42,13 @@ class SafetyMonitor:
 
     def check_ppe(self, objects_list: list[dict]) -> list[dict]:
         violations = []
-        persons = [o for o in objects_list if o.get("label") == "person"]
-        ppe_items = [o for o in objects_list if o.get("label") in PPE_CLASSES]
+        persons = [o for o in objects_list if o.get("class_name") == "person"]
+        ppe_items = [o for o in objects_list if o.get("class_name") in PPE_CLASSES]
 
         for person in persons:
             pb = person.get("bbox", [0, 0, 0, 0])
+            if isinstance(pb, dict):
+                pb = [pb.get("x1", 0), pb.get("y1", 0), pb.get("x2", 0), pb.get("y2", 0)]
             px, py = (pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2
             ph = abs(pb[3] - pb[1])
             proximity = max(ph * 1.5, 50)
@@ -54,14 +56,16 @@ class SafetyMonitor:
             found = set()
             for item in ppe_items:
                 ib = item.get("bbox", [0, 0, 0, 0])
+                if isinstance(ib, dict):
+                    ib = [ib.get("x1", 0), ib.get("y1", 0), ib.get("x2", 0), ib.get("y2", 0)]
                 ix, iy = (ib[0] + ib[2]) / 2, (ib[1] + ib[3]) / 2
                 if abs(ix - px) < proximity and abs(iy - py) < proximity:
-                    found.add(item["label"])
+                    found.add(item["class_name"])
 
             missing = [c for c in PPE_CLASSES if c not in found]
             if missing:
                 violations.append({
-                    "entity_id": person.get("id", "unknown"),
+                    "entity_id": str(person.get("track_id", "unknown")),
                     "missing_ppe": missing,
                     "bbox": pb,
                 })

@@ -1,6 +1,6 @@
 """VisionBrain Edge Pipeline — main entry point.
 
-Ties together: frame capture → privacy → detection → audio → event emission.
+Ties together: frame capture → privacy → detection → pose → activity → edge VLM → event emission.
 """
 
 import argparse
@@ -13,6 +13,7 @@ import uuid
 
 from capture.frame_extractor import FrameExtractor
 from detection.detector import OpenVocabDetector, PoseEstimator
+from detection.activity_recognizer import ActivityRecognizer
 from emitter.event_emitter import EventEmitter, encode_keyframe
 from privacy.engine import PrivacyEngine
 
@@ -20,7 +21,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 logger = logging.getLogger("visionbrain.edge")
 
 
-def build_event(camera_id, meta, detections, poses, audio_events, keyframe_b64):
+def build_event(camera_id, meta, detections, poses, audio_events, keyframe_b64,
+                activity_events=None, vlm_desc=None):
     objects = []
     pose_map = {p["track_id"]: p["keypoints"] for p in poses}
     for d in detections:
@@ -34,7 +36,7 @@ def build_event(camera_id, meta, detections, poses, audio_events, keyframe_b64):
             obj["pose"] = pose_map[d["track_id"]]
         objects.append(obj)
 
-    return {
+    event = {
         "event_id": str(uuid.uuid4()),
         "timestamp": meta["timestamp"],
         "camera_id": camera_id,
@@ -46,6 +48,18 @@ def build_event(camera_id, meta, detections, poses, audio_events, keyframe_b64):
         "keyframe_b64": keyframe_b64,
         "privacy_applied": True,
     }
+
+    if activity_events:
+        event["activity_events"] = [
+            {"track_id": a.track_id, "activity": a.activity, "confidence": round(a.confidence, 3)}
+            for a in activity_events
+        ]
+
+    if vlm_desc:
+        event["edge_vlm_description"] = vlm_desc.description
+        event["edge_vlm_anomaly_hints"] = vlm_desc.anomaly_hints
+
+    return event
 
 
 def main():
@@ -59,13 +73,13 @@ def main():
     parser.add_argument("--no-privacy", action="store_true")
     parser.add_argument("--no-pose", action="store_true")
     parser.add_argument("--no-audio", action="store_true")
+    parser.add_argument("--no-vlm", action="store_true", help="Disable edge VLM scene descriptions")
     parser.add_argument("--model", default="yolov8n.pt")
     parser.add_argument("--confidence", type=float, default=0.3)
     parser.add_argument("--min-fps", type=int, default=1)
     parser.add_argument("--max-fps", type=int, default=5)
     args = parser.parse_args()
 
-    # Try to interpret source as int (webcam index)
     try:
         source = int(args.source)
     except ValueError:
@@ -77,7 +91,18 @@ def main():
     detector = OpenVocabDetector(args.model, args.confidence)
     detector.set_classes(args.classes)
     pose_estimator = PoseEstimator() if not args.no_pose else None
+    activity_recognizer = ActivityRecognizer() if not args.no_pose else None
     emitter = EventEmitter(mode=args.mode, pubsub_topic=args.pubsub_topic, project_id=args.project_id)
+
+    # Edge VLM (optional)
+    vlm_scheduler = None
+    if not args.no_vlm:
+        try:
+            from detection.edge_vlm import EdgeVLM, EdgeVLMScheduler
+            vlm_scheduler = EdgeVLMScheduler(EdgeVLM(), interval_s=30.0, anomaly_threshold=0.05)
+            logger.info("Edge VLM enabled")
+        except Exception as e:
+            logger.warning("Edge VLM disabled: %s", e)
 
     # Audio (optional)
     audio_classifier = None
@@ -92,7 +117,6 @@ def main():
         except Exception as e:
             logger.warning("Audio disabled: %s", e)
 
-    # Graceful shutdown
     running = True
 
     def _shutdown(sig, frame):
@@ -103,7 +127,8 @@ def main():
     signal.signal(signal.SIGTERM, _shutdown)
 
     extractor.start()
-    logger.info("Edge pipeline running — classes=%s, mode=%s", args.classes, args.mode)
+    logger.info("Edge pipeline running — classes=%s, mode=%s, open_vocab=%s",
+                args.classes, args.mode, detector.is_open_vocab)
 
     frame_count = 0
     t0 = time.time()
@@ -129,26 +154,48 @@ def main():
                 except Exception:
                     pass
 
-            # 4. Audio
+            # 4. Activity recognition from pose sequences
+            activity_events = []
+            if activity_recognizer and poses:
+                for p in poses:
+                    if p["track_id"] >= 0 and p.get("keypoints"):
+                        activity_recognizer.update(
+                            p["track_id"], p["keypoints"],
+                            p["bbox"], meta["timestamp"])
+                activity_events = activity_recognizer.classify_all(meta["timestamp"])
+                if frame_count % 100 == 0:
+                    activity_recognizer.cleanup()
+
+            # 5. Audio
             audio_events = []
             if audio_classifier and audio_capture:
                 chunk = audio_capture.get_chunk(timeout=0.01)
                 if chunk is not None:
                     audio_events = audio_classifier.classify(chunk)
 
-            # 5. Encode keyframe
+            # 6. Edge VLM — check on anomalous frames or periodic interval
+            vlm_desc = None
+            if vlm_scheduler:
+                vlm_desc = vlm_scheduler.check(
+                    processed, args.camera_id, anomaly_score=meta["scene_activity"])
+
+            # 7. Encode keyframe
             keyframe_b64 = encode_keyframe(processed) if detections else None
 
-            # 6. Build and emit event
-            event = build_event(args.camera_id, meta, detections, poses, audio_events, keyframe_b64)
+            # 8. Build and emit event
+            event = build_event(
+                args.camera_id, meta, detections, poses, audio_events, keyframe_b64,
+                activity_events=activity_events, vlm_desc=vlm_desc)
             emitter.emit(event)
 
             frame_count += 1
             if frame_count % 50 == 0:
                 elapsed = time.time() - t0
+                act_str = ", ".join(f"{a.activity}({a.track_id})" for a in activity_events) or "none"
                 logger.info(
-                    "Processed %d frames (%.1f fps) | objects=%d activity=%.3f",
-                    frame_count, frame_count / elapsed, len(detections), meta["scene_activity"],
+                    "Processed %d frames (%.1f fps) | objects=%d activity=%.3f actions=[%s]",
+                    frame_count, frame_count / elapsed, len(detections),
+                    meta["scene_activity"], act_str,
                 )
     finally:
         extractor.stop()
