@@ -1,0 +1,16 @@
+services:
+  edge-pipeline:
+    build: .
+    volumes:
+      - ./events_out:/app/events_out
+      - ./sample_videos:/app/sample_videos
+    environment:
+      - CAMERA_SOURCE=/app/sample_videos/test.mp4
+    command: >
+      python main.py
+        --source /app/sample_videos/test.mp4
+        --camera-id cam-dev
+        --classes person vehicle
+        --mode local
+        --no-audio
+        --no-pose

@@ -1,0 +1,11 @@
+opencv-python-headless>=4.9
+numpy>=1.26
+ultralytics>=8.3
+torch>=2.2
+sounddevice>=0.4
+tensorflow-hub>=0.16
+openai-whisper>=20231117
+google-cloud-pubsub>=2.21
+google-cloud-storage>=2.16
+Pillow>=10.2
+pydantic>=2.6
