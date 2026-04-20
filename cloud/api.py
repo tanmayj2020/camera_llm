@@ -1,19 +1,422 @@
 """VisionBrain Cloud API — FastAPI service orchestrating all intelligence layers."""
 
+import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
+import uuid
+from collections import defaultdict
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO)
+# ── Structured JSON logging ──────────────────────────────────────────────
+LOG_FORMAT = os.getenv("LOG_FORMAT", "text")  # "json" or "text"
+
+if LOG_FORMAT == "json":
+    import json as _json
+
+    class _JSONFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            return _json.dumps({
+                "ts": self.formatTime(record),
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+                "module": record.module,
+                "line": record.lineno,
+            })
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(_JSONFormatter())
+    logging.root.handlers = [_handler]
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 logger = logging.getLogger("visionbrain.cloud")
 
-app = FastAPI(title="VisionBrain Cloud API", version="0.5.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+_VERSION = "0.7.0"
+
+
+# ── Git hash & build metadata ───────────────────────────────────────────
+def _get_git_hash() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=3,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+_GIT_HASH = _get_git_hash()
+
+
+# ── Configuration validation ────────────────────────────────────────────
+def _validate_config():
+    """Validate critical environment variables at import time."""
+    errors = []
+
+    # Numeric range checks
+    det_conf = float(os.getenv("DETECTION_CONFIDENCE", "0.3"))
+    if not 0.0 < det_conf < 1.0:
+        errors.append(f"DETECTION_CONFIDENCE={det_conf} must be between 0 and 1")
+
+    rate_limit = int(os.getenv("RATE_LIMIT_RPM", "300"))
+    if rate_limit < 1:
+        errors.append(f"RATE_LIMIT_RPM={rate_limit} must be >= 1")
+
+    # Auth config consistency
+    auth_enabled = os.getenv("AUTH_ENABLED", "false").lower() == "true"
+    jwt_secret = os.getenv("JWT_SECRET", "")
+    if auth_enabled and not jwt_secret:
+        errors.append("JWT_SECRET required when AUTH_ENABLED=true")
+
+    # Database URL sanity
+    db_url = os.getenv("DATABASE_URL", "sqlite:///visionbrain.db")
+    if "postgresql" in db_url and "password" in db_url and "@localhost" not in db_url:
+        logger.warning("DATABASE_URL contains inline password — use env var or secrets manager")
+
+    if errors:
+        for e in errors:
+            logger.error("Config validation failed: %s", e)
+        raise SystemExit(1)
+
+
+_validate_config()
+
+
+# ── Circuit breaker for external services ────────────────────────────────
+class CircuitBreaker:
+    """Simple circuit breaker: CLOSED → OPEN (after N failures) → HALF_OPEN → CLOSED."""
+
+    def __init__(self, name: str, failure_threshold: int = 5,
+                 recovery_timeout: float = 30.0):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self._failure_count = 0
+        self._last_failure_time = 0.0
+        self._state = "closed"  # closed | open | half_open
+
+    @property
+    def state(self) -> str:
+        if self._state == "open":
+            if time.time() - self._last_failure_time >= self.recovery_timeout:
+                self._state = "half_open"
+        return self._state
+
+    def record_success(self):
+        self._failure_count = 0
+        self._state = "closed"
+
+    def record_failure(self):
+        self._failure_count += 1
+        self._last_failure_time = time.time()
+        if self._failure_count >= self.failure_threshold:
+            self._state = "open"
+            logger.warning("Circuit breaker OPEN for %s after %d failures",
+                           self.name, self._failure_count)
+
+    def allow_request(self) -> bool:
+        s = self.state
+        if s == "closed":
+            return True
+        if s == "half_open":
+            return True  # allow one probe request
+        return False  # open — fast fail
+
+
+_circuit_breakers = {
+    "neo4j": CircuitBreaker("neo4j"),
+    "qdrant": CircuitBreaker("qdrant"),
+    "postgres": CircuitBreaker("postgres"),
+}
+
+
+# ── Startup health checks + graceful shutdown ────────────────────────────
+async def _check_connectivity():
+    """Verify external services are reachable on startup."""
+    checks = {}
+
+    # Neo4j
+    try:
+        kg = get_kg()
+        kg._driver.verify_connectivity()
+        checks["neo4j"] = "ok"
+    except Exception as e:
+        checks["neo4j"] = f"unreachable: {e}"
+        logger.warning("Neo4j not reachable: %s", e)
+
+    # Qdrant
+    try:
+        from qdrant_client import QdrantClient
+        qc = QdrantClient(host=os.getenv("QDRANT_HOST", "localhost"),
+                          port=int(os.getenv("QDRANT_PORT", "6333")), timeout=3)
+        qc.get_collections()
+        checks["qdrant"] = "ok"
+    except Exception as e:
+        checks["qdrant"] = f"unreachable: {e}"
+        logger.warning("Qdrant not reachable: %s", e)
+
+    # PostgreSQL
+    try:
+        store = get_persistence()
+        if hasattr(store, "_pool") and store._pool:
+            with store._pool.connection() as conn:
+                conn.execute("SELECT 1")
+            checks["postgres"] = "ok"
+        else:
+            checks["postgres"] = "skipped (SQLite mode)"
+    except Exception as e:
+        checks["postgres"] = f"unreachable: {e}"
+        logger.warning("PostgreSQL not reachable: %s", e)
+
+    for svc, status in checks.items():
+        if status == "ok":
+            logger.info("✓ %s connected", svc)
+        else:
+            logger.warning("✗ %s: %s", svc, status)
+
+    return checks
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle."""
+    # ── Startup banner ──
+    banner = (
+        f"\n╔══════════════════════════════════════════════╗\n"
+        f"║  VisionBrain Cloud API v{_VERSION:<21s}║\n"
+        f"║  Git: {_GIT_HASH:<8s} | PID: {os.getpid():<20d}║\n"
+        f"║  Backend: {'PostgreSQL' if 'postgresql' in os.getenv('DATABASE_URL', '') else 'SQLite'}"
+        f" + Neo4j + Qdrant        ║\n"
+        f"║  Auth: {'ENABLED' if os.getenv('AUTH_ENABLED', 'false').lower() == 'true' else 'DISABLED':<10s}"
+        f"| Rate Limit: {_RATE_LIMIT_RPM} RPM   ║\n"
+        f"║  Log format: {LOG_FORMAT:<8s} | CORS origins: {len(ALLOWED_ORIGINS):<4d}  ║\n"
+        f"╚══════════════════════════════════════════════╝"
+    )
+    logger.info(banner)
+
+    # ── Dependency connectivity checks ──
+    startup_checks = await _check_connectivity()
+    app.state.startup_checks = startup_checks
+    app.state.ready = False  # not ready until checks complete
+    app.state.live_since = time.time()
+
+    # ── Database migration check ──
+    try:
+        store = get_persistence()
+        if hasattr(store, "_pool") and store._pool:
+            with store._pool.connection() as conn:
+                conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS _schema_version (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                logger.info("✓ Database schema verified")
+    except Exception as e:
+        logger.warning("Database migration check skipped: %s", e)
+
+    # ── Model pre-warming (non-blocking) ──
+    warm_results = {}
+    try:
+        reasoner = get_reasoner()
+        warm_results["reasoning_engine"] = "ok" if reasoner else "failed"
+    except Exception as e:
+        warm_results["reasoning_engine"] = f"failed: {e}"
+    try:
+        spatial = get_spatial()
+        warm_results["spatial_memory"] = "ok" if spatial else "failed"
+    except Exception as e:
+        warm_results["spatial_memory"] = f"failed: {e}"
+    try:
+        baseline = get_baseline()
+        warm_results["baseline_learner"] = "ok" if baseline else "failed"
+    except Exception as e:
+        warm_results["baseline_learner"] = f"failed: {e}"
+    try:
+        wm = get_world_model()
+        warm_results["world_model"] = "ok" if wm else "failed"
+    except Exception as e:
+        warm_results["world_model"] = f"failed: {e}"
+
+    for svc, status in warm_results.items():
+        if status == "ok":
+            logger.info("✓ Warmed %s", svc)
+        else:
+            logger.warning("✗ Warm %s: %s", svc, status)
+    app.state.warm_results = warm_results
+
+    # ── Initialize OpenTelemetry if configured ──
+    try:
+        from shared.telemetry import init_telemetry
+        init_telemetry()
+        logger.info("✓ OpenTelemetry initialized")
+    except Exception:
+        pass
+
+    # ── Mark ready ──
+    app.state.ready = True
+    logger.info("VisionBrain Cloud API ready — accepting requests")
+
+    # ── Background health monitor ──
+    _health_task = asyncio.create_task(_background_health_loop(app))
+
+    yield  # ── app runs here ──
+
+    # ── Graceful shutdown ──
+    logger.info("Shutting down — cleaning up resources")
+    _health_task.cancel()
+
+    # Close DB pools
+    try:
+        store = _services.get("persistence")
+        if store and hasattr(store, "_pool") and store._pool:
+            store._pool.close()
+            logger.info("PostgreSQL pool closed")
+    except Exception:
+        pass
+
+    # Close Neo4j driver
+    try:
+        kg = _services.get("kg")
+        if kg and hasattr(kg, "_driver"):
+            kg._driver.close()
+            logger.info("Neo4j driver closed")
+    except Exception:
+        pass
+
+    # Close WebSocket connections
+    for ws in ws_connections[:]:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+    ws_connections.clear()
+    logger.info("Shutdown complete (uptime: %.1fs)", time.time() - app.state.live_since)
+
+
+async def _background_health_loop(app: FastAPI):
+    """Periodically re-check dependency health (every 30s)."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            checks = {}
+
+            # Neo4j
+            try:
+                kg = _services.get("kg")
+                if kg and hasattr(kg, "_driver"):
+                    kg._driver.verify_connectivity()
+                    checks["neo4j"] = "ok"
+                    _circuit_breakers["neo4j"].record_success()
+                else:
+                    checks["neo4j"] = "not initialized"
+            except Exception as e:
+                checks["neo4j"] = f"unreachable: {e}"
+                _circuit_breakers["neo4j"].record_failure()
+
+            # Qdrant
+            try:
+                from qdrant_client import QdrantClient
+                qc = QdrantClient(host=os.getenv("QDRANT_HOST", "localhost"),
+                                  port=int(os.getenv("QDRANT_PORT", "6333")), timeout=3)
+                qc.get_collections()
+                checks["qdrant"] = "ok"
+                _circuit_breakers["qdrant"].record_success()
+            except Exception as e:
+                checks["qdrant"] = f"unreachable: {e}"
+                _circuit_breakers["qdrant"].record_failure()
+
+            # PostgreSQL
+            try:
+                store = _services.get("persistence")
+                if store and hasattr(store, "_pool") and store._pool:
+                    with store._pool.connection() as conn:
+                        conn.execute("SELECT 1")
+                    checks["postgres"] = "ok"
+                    _circuit_breakers["postgres"].record_success()
+                else:
+                    checks["postgres"] = "skipped"
+            except Exception as e:
+                checks["postgres"] = f"unreachable: {e}"
+                _circuit_breakers["postgres"].record_failure()
+
+            app.state.startup_checks = checks
+
+            # Log if any service went down
+            down = [k for k, v in checks.items() if v != "ok" and v != "skipped" and v != "not initialized"]
+            if down:
+                logger.warning("Health check: services down: %s", down)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.debug("Background health check error: %s", e)
+
+
+# ── Rate limiter (token bucket per IP) ───────────────────────────────────
+_RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "300"))  # requests per minute
+_rate_buckets: dict[str, list] = defaultdict(lambda: [0.0, _RATE_LIMIT_RPM])
+# [last_refill_ts, tokens]
+
+
+def _check_rate_limit(client_ip: str) -> bool:
+    """Token bucket rate limiter. Returns True if allowed."""
+    bucket = _rate_buckets[client_ip]
+    now = time.time()
+    elapsed = now - bucket[0]
+    # Refill tokens
+    bucket[1] = min(_RATE_LIMIT_RPM, bucket[1] + elapsed * (_RATE_LIMIT_RPM / 60.0))
+    bucket[0] = now
+    if bucket[1] >= 1.0:
+        bucket[1] -= 1.0
+        return True
+    return False
+
+
+# ── App setup ────────────────────────────────────────────────────────────
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
+app = FastAPI(title="VisionBrain Cloud API", version=_VERSION, lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    allow_credentials=True,
+)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Attach a unique request ID for tracing."""
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Per-IP rate limiting middleware."""
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+        )
+    response = await call_next(request)
+    return response
+
 
 _services = {}
 
@@ -270,8 +673,8 @@ def get_floor_plan():
                     fp.register_spatial_memory(cam_ids[0], get_spatial())
                     _services["floor_plan"] = fp
                     return fp
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_spatial: %s", _e)
         for i, cam_id in enumerate(["cam-0", "cam-1", "cam-2", "cam-3"]):
             fp.register_camera(cam_id, site_x=10 + (i % 2) * 25,
                                site_y=10 + (i // 2) * 25, rotation_deg=i * 90)
@@ -801,8 +1204,8 @@ async def ingest_event(payload: EventPayload):
     # 3b. Occupancy update
     try:
         get_occupancy().update(event["camera_id"], spatial)
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning("get_occupancy: %s", _e)
 
     # 3b-ii. Re-ID embeddings + cross-camera tracking
     if event.get("keyframe_b64"):
@@ -816,8 +1219,8 @@ async def ingest_event(payload: EventPayload):
                         import numpy as _np
                         xtracker.match_across_cameras(
                             str(obj["track_id"]), event["camera_id"], _np.array(emb))
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_cross_camera_tracker: %s", _e)
 
     # 3b-iii. HyperGraphRAG event indexing
     if event.get("keyframe_b64"):
@@ -828,8 +1231,8 @@ async def ingest_event(payload: EventPayload):
                 event["keyframe_b64"],
                 f"{len(event.get('objects', []))} objects detected",
                 entity_ids)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_hypergraph_rag: %s", _e)
 
     # 3c. Safety evaluation
     scene_state = {
@@ -847,10 +1250,10 @@ async def ingest_event(payload: EventPayload):
             await broadcast_alert({"type": "safety_alert", "alert": sa})
             try:
                 get_event_bus().publish("safety_alert", sa)
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _e:
+                logger.warning("get_event_bus: %s", _e)
+    except Exception as _e:
+        logger.warning("get_event_bus: %s", _e)
 
     # 3d. LPR for vehicle objects
     for obj in event.get("objects", []):
@@ -862,8 +1265,8 @@ async def ingest_event(payload: EventPayload):
                 if crop_b64:
                     get_lpr().recognize(crop_b64, event["camera_id"],
                                         str(obj.get("track_id", "")), event["timestamp"])
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("get_lpr: %s", _e)
 
     # 3e. Contextual normality scoring
     ctx_anomaly = 0.0
@@ -873,20 +1276,20 @@ async def ingest_event(payload: EventPayload):
         ctx_norm.ingest(event["camera_id"], person_count, event["timestamp"])
         ctx_anomaly = ctx_norm.compute_contextual_anomaly_score(
             event["camera_id"], person_count, event["timestamp"])
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning("get_contextual_normality: %s", _e)
 
     # 3f. Scene graph update
     try:
         get_scene_graph().update(spatial, event["timestamp"])
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning("get_scene_graph: %s", _e)
 
     # 3g. Collective anomaly ingestion
     try:
         get_collective_detector().ingest(event)
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning("get_collective_detector: %s", _e)
 
     # 3h. Environment detection when keyframe present
     if event.get("keyframe_b64"):
@@ -895,8 +1298,8 @@ async def ingest_event(payload: EventPayload):
                 event["keyframe_b64"], event["camera_id"], spatial)
             for ea in env_alerts:
                 await broadcast_alert({"type": "environment_alert", "alert": ea.__dict__})
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_environment_detector: %s", _e)
 
     # 3i. Tailgate detection
     try:
@@ -905,10 +1308,10 @@ async def ingest_event(payload: EventPayload):
             await broadcast_alert({"type": "tailgate_alert", "alert": te.__dict__})
             try:
                 get_event_bus().publish("tailgate_alert", te.__dict__)
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _e:
+                logger.warning("get_event_bus: %s", _e)
+    except Exception as _e:
+        logger.warning("get_event_bus: %s", _e)
 
     # 3j. Dwell time + heatmap updates
     try:
@@ -924,10 +1327,10 @@ async def ingest_event(payload: EventPayload):
                     in_zone = spatial.entities_in_zone(zid)
                     if any(getattr(e, "track_id", None) == eid for e in in_zone):
                         dwell.update(eid, zid, event["timestamp"])
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as _e:
+                    logger.debug("Event bus publish failed: %s", _e)
+    except Exception as _e:
+        logger.warning("get_heatmap_engine: %s", _e)
 
     # 3k. Proactive agent evaluation
     try:
@@ -936,10 +1339,10 @@ async def ingest_event(payload: EventPayload):
             await broadcast_alert({"type": "proactive_insight", "insight": pi.__dict__})
             try:
                 get_event_bus().publish("proactive_insight", pi.__dict__)
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _e:
+                logger.warning("get_event_bus: %s", _e)
+    except Exception as _e:
+        logger.warning("get_event_bus: %s", _e)
 
     # 3l. Audio-visual fusion when both audio and visual present
     if event.get("audio_events") and event.get("objects"):
@@ -952,10 +1355,10 @@ async def ingest_event(payload: EventPayload):
                     await broadcast_alert({"type": "av_confirmed", "correlation": avr.__dict__})
                     try:
                         get_event_bus().publish("av_confirmed", avr.__dict__)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as _e:
+                        logger.warning("get_event_bus: %s", _e)
+        except Exception as _e:
+            logger.warning("get_event_bus: %s", _e)
 
     # 3m. Adversarial robustness monitoring
     try:
@@ -966,18 +1369,18 @@ async def ingest_event(payload: EventPayload):
             await broadcast_alert({"type": "degradation_alert", "alert": da.__dict__})
             try:
                 get_event_bus().publish("degradation_alert", da.__dict__)
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _e:
+                logger.warning("get_event_bus: %s", _e)
+    except Exception as _e:
+        logger.warning("get_event_bus: %s", _e)
 
     # 3n. Entity journey recording
     try:
         jv = get_journey_visualizer()
         for eid, ent in spatial._entities.items():
             jv.record_sighting(eid, event["camera_id"], ent.position.tolist(), event["timestamp"])
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning("get_journey_visualizer: %s", _e)
 
     # 3o. Behavioral stress detection
     # 3o. Behavioral stress detection
@@ -987,10 +1390,10 @@ async def ingest_event(payload: EventPayload):
             await broadcast_alert({"type": "stress_assessment", "assessment": sa.__dict__})
             try:
                 get_event_bus().publish("stress_assessment", sa.__dict__)
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _e:
+                logger.warning("get_event_bus: %s", _e)
+    except Exception as _e:
+        logger.warning("get_event_bus: %s", _e)
 
     # 3p. Gait DNA observation
     try:
@@ -1015,8 +1418,8 @@ async def ingest_event(payload: EventPayload):
                     "matched_entity": match.matched_entity_id,
                     "similarity": match.similarity,
                 })
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning("Check for cross-session matches: %s", _e)
 
     # 3q. Predictive path interception
     try:
@@ -1034,18 +1437,18 @@ async def ingest_event(payload: EventPayload):
                 get_event_bus().publish("predictive_interception", {
                     "entity": ia.entity_id, "zone": ia.target_zone_id,
                     "eta": ia.estimated_arrival_s, "confidence": ia.confidence})
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as _e:
+                logger.warning("get_zone_id: %s", _e)
+    except Exception as _e:
+        logger.warning("get_zone_id: %s", _e)
 
     # 3r. Scene déjà vu encoding
     try:
         get_deja_vu().encode_and_store(
             scene_state, event_type=event.get("event_type", ""),
             zone_id=event.get("zone_id", ""))
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning("get_deja_vu: %s", _e)
 
     # 4. Reasoning engine
     rule_results = get_reasoner().evaluate(scene_state)
@@ -1077,8 +1480,8 @@ async def ingest_event(payload: EventPayload):
             get_event_bus().publish("prediction_divergence", {
                 "score": divergence.overall, "camera_id": event["camera_id"],
                 "details": divergence.details})
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_event_bus: %s", _e)
 
     # 6. Process triggered rules → causal analysis → action engine
     alerts_sent = []
@@ -1106,30 +1509,30 @@ async def ingest_event(payload: EventPayload):
         try:
             if get_semantic_dedup().is_duplicate(anomaly):
                 continue
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_semantic_dedup: %s", _e)
         try:
             get_persistence().save_alert(anomaly)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_persistence: %s", _e)
         try:
             get_webhook_manager().deliver_alert(anomaly)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_webhook_manager: %s", _e)
 
         # Explain alert
         try:
             explanation = get_explainer().explain(anomaly, event["camera_id"])
             anomaly["explanation"] = explanation
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_explainer: %s", _e)
 
         # Visual grounding
         try:
             grounded = get_visual_grounder().ground_anomaly(anomaly, event.get("keyframe_b64"), spatial)
             anomaly["grounded_boxes"] = grounded.bounding_boxes
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_visual_grounder: %s", _e)
 
         notifications = get_action_engine().process_anomaly(anomaly, causal)
         alerts_sent.extend([n.subject for n in notifications])
@@ -1138,8 +1541,8 @@ async def ingest_event(payload: EventPayload):
             get_floor_plan().add_alert(
                 event["event_id"], event["camera_id"],
                 rr.severity.value, " → ".join(rr.explanation_chain))
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_floor_plan: %s", _e)
 
         await broadcast_alert({
             "type": "alert", "anomaly": anomaly,
@@ -1149,8 +1552,8 @@ async def ingest_event(payload: EventPayload):
         # Publish to event bus
         try:
             get_event_bus().publish("alert", anomaly)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_event_bus: %s", _e)
 
     # 7. Broadcast predictions
     for pred in predictions:
@@ -1170,8 +1573,8 @@ async def ingest_event(payload: EventPayload):
                 "level": ambient.level,
                 "top_driver": ambient.top_driver,
             })
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning("get_ambient_score: %s", _e)
 
     # 9. Anomaly contagion prediction (when alerts fired)
     if rule_results:
@@ -1190,8 +1593,8 @@ async def ingest_event(payload: EventPayload):
                     "source_zone": w.source_zone,
                     "recommendation": w.recommendation,
                 })
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_contagion_network: %s", _e)
 
     # 10. Scene déjà vu detection (when anomaly detected)
     deja_vu_matches = []
@@ -1211,8 +1614,8 @@ async def ingest_event(payload: EventPayload):
                         "narrative": m.narrative,
                         "historical_event": m.historical_event_type,
                     })
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_deja_vu: %s", _e)
 
     return {
         "status": "ok",
@@ -2095,8 +2498,8 @@ async def get_all_ambient_scores():
                 "zone_id": result.zone_id, "score": result.score,
                 "level": result.level, "top_driver": result.top_driver,
             })
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("get_ambient_score: %s", _e)
     return results
 
 
@@ -2245,5 +2648,32 @@ async def websocket_alerts(websocket: WebSocket):
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok", "timestamp": time.time(), "version": "0.5.0"}
+async def health(request: Request):
+    checks = getattr(request.app.state, "startup_checks", {})
+    all_ok = all(v == "ok" or v.startswith("skipped") or v == "not initialized"
+                 for v in checks.values())
+    breaker_states = {k: v.state for k, v in _circuit_breakers.items()}
+    return {
+        "status": "ok" if all_ok else "degraded",
+        "timestamp": time.time(),
+        "version": _VERSION,
+        "git_hash": _GIT_HASH,
+        "uptime_s": round(time.time() - getattr(request.app.state, "live_since", time.time()), 1),
+        "services": checks,
+        "circuit_breakers": breaker_states,
+    }
+
+
+@app.get("/live")
+async def liveness():
+    """Kubernetes liveness probe — is the process alive?"""
+    return {"status": "alive", "timestamp": time.time()}
+
+
+@app.get("/ready")
+async def readiness(request: Request):
+    """Kubernetes readiness probe — can we accept traffic?"""
+    ready = getattr(request.app.state, "ready", False)
+    if not ready:
+        return JSONResponse(status_code=503, content={"status": "not_ready"})
+    return {"status": "ready", "timestamp": time.time()}

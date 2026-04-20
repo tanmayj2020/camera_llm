@@ -1,0 +1,49 @@
+flowchart LR
+    TRIGGER["🔀 Git Push / PR\n(main, develop)"] --> PARALLEL
+
+    subgraph PARALLEL["⚡ Parallel Jobs"]
+        direction TB
+
+        subgraph PYTHON["🐍 Python Tests"]
+            PY311["Python 3.11"]
+            PY312["Python 3.12"]
+            DEPS["pip install\ndependencies"]
+            PYTEST["pytest tests/ -v\n(64 tests)"]
+            RUFF["ruff check\n(lint E,F,W)"]
+            
+            PY311 --> DEPS
+            PY312 --> DEPS
+            DEPS --> PYTEST --> RUFF
+        end
+
+        subgraph DASH_B["🖥️ Dashboard Build"]
+            NODE["Node.js 20"]
+            NPM["npm ci"]
+            TSC["tsc --noEmit\n(type check)"]
+            BUILD["npm run build\n(Next.js production)"]
+            NODE --> NPM --> TSC --> BUILD
+        end
+
+        subgraph GO_B["🔧 Go Build"]
+            GO122["Go 1.22"]
+            GOBUILD["go build ./..."]
+            GOVET["go vet ./..."]
+            GO122 --> GOBUILD --> GOVET
+        end
+    end
+
+    PARALLEL --> GATE{"All Jobs\nPassed?"}
+
+    GATE -->|"Yes + main branch"| DOCKER
+
+    subgraph DOCKER["🐳 Docker Builds"]
+        EDGE_IMG["visionbrain-edge\n:sha"]
+        CLOUD_IMG["visionbrain-cloud\n:sha"]
+    end
+
+    GATE -->|"No"| FAIL["❌ Block Merge"]
+
+    style PYTHON fill:#1a3c34,stroke:#2ecc71,color:#fff
+    style DASH_B fill:#1e3a5f,stroke:#4a9eff,color:#fff
+    style GO_B fill:#2d1b69,stroke:#9b59b6,color:#fff
+    style DOCKER fill:#3c3c1a,stroke:#f1c40f,color:#fff

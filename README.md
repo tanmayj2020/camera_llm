@@ -1,6 +1,6 @@
 # VisionBrain — Intelligent CCTV Analytics Platform
 
-An industry-agnostic platform that gives every CCTV camera a "brain." With **49 service modules**, **98 API endpoints**, and **56 lazy-initialized services**, VisionBrain combines open-vocabulary detection, temporal knowledge hypergraphs, neuro-symbolic reasoning, agentic action engines, multimodal LLMs, social force crowd modeling, dynamic scene graphs, contextual normality baselines, counterfactual explanations, visual grounding, behavioral stress detection, predictive staffing, cross-site intelligence federation, and GDPR-native consent management into a single coherent intelligence layer. Unlike traditional VMS/VCA systems that rely on static rules and siloed analytics, VisionBrain fuses spatial memory, causal understanding, world-model prediction, and continual learning to deliver real-time situational awareness, autonomous investigation, and plain-English conversational access to live and historical footage.
+An industry-agnostic platform that gives every CCTV camera a "brain." With **55+ service modules**, **98+ API endpoints**, and **64 unit tests**, VisionBrain combines YOLO-World v2 open-vocabulary detection, Qwen2.5-VL edge vision, Depth Anything V2 spatial understanding, CLIP-ReID cross-camera tracking, GTE-Qwen2 embeddings, SigLIP visual encoding, BEATs/AST audio classification, temporal knowledge hypergraphs, neuro-symbolic reasoning, agentic action engines, Gemini 2.5 Pro causal analysis, social force crowd modeling, dynamic scene graphs, contextual normality baselines, counterfactual explanations, visual grounding, behavioral stress detection, predictive staffing, cross-site intelligence federation, and GDPR-native consent management into a single coherent intelligence layer. Novel features include **Natural Language Rule Compilation**, **Ambient Intelligence Scoring** (9-signal Bayesian fusion), **Predictive Interception**, **Gait DNA Biometrics**, **Anomaly Contagion Networks**, and **Déjà Vu scene matching** — capabilities not available in any existing CCTV analytics platform.
 
 ---
 
@@ -119,16 +119,23 @@ An industry-agnostic platform that gives every CCTV camera a "brain." With **49 
 | Layer | Technology |
 |-------|-----------|
 | Edge Runtime | Python 3.12, OpenCV, PyAudio |
-| Detection | YOLOv8 / YOLOE (open-vocabulary), InternVL-2B (edge VLM) |
-| Cloud API | Python / FastAPI (async, 98 endpoints) |
-| Event Processor | Go 1.22 (high-throughput Pub/Sub fan-out) |
+| Detection | YOLO-World v2 / YOLO11 (open-vocabulary), ViTPose++ (pose), Qwen2.5-VL-3B (edge VLM) |
+| Face/Plate | InsightFace SCRFD (face detection), YOLO plate detector |
+| Audio | BEATs / AST (audio classification) |
+| Cloud API | Python / FastAPI (async, 98+ endpoints, rate-limited, structured JSON logging) |
+| Event Processor | Go 1.22 (batch BQ inserts, exponential retry, structured slog logging) |
 | Knowledge Graph | Neo4j 5 (bi-temporal, Graphiti-style edges) |
-| Vector Store | Qdrant (keyframe + alert embeddings) |
-| Relational Store | SQLite (config, trackers, webhooks, audit) |
-| Vision LLM | Google Gemini VLM (causal analysis, synopsis, grounding) |
-| Embeddings | sentence-transformers (semantic dedup, entity resolution) |
-| Dashboard | Next.js 14, TypeScript, React 18, Tailwind CSS |
-| Infrastructure | GCP (Pub/Sub, GCS, BigQuery), Terraform, Docker |
+| Vector Store | Qdrant (SigLIP + GTE-Qwen2 embeddings) |
+| Relational Store | PostgreSQL + pgvector (config, trackers, webhooks, audit) |
+| Depth Estimation | Depth Anything V2 (spatial memory) |
+| Re-ID | CLIP-ReID (cross-camera tracking) |
+| Vision LLM | Gemini 2.5 Pro (causal analysis, synopsis, grounding) |
+| Embeddings | GTE-Qwen2 (semantic dedup, entity resolution) |
+| Dashboard | Next.js 14, TypeScript, React 18, Tailwind CSS, TanStack Query, HLS.js, Zustand, Sonner |
+| Observability | OpenTelemetry (traces + metrics) |
+| Infrastructure | GCP (Pub/Sub, GCS, BigQuery, GKE Autopilot), Terraform, Docker |
+| CI/CD | GitHub Actions (Python tests + lint, Dashboard build, Go vet, Docker builds) |
+| Testing | pytest (64 unit tests across 7 test files) |
 
 ---
 
@@ -519,7 +526,78 @@ cctv_llm_project_twp/
 
 ---
 
+## Novel Features (Industry Firsts)
+
+| Feature | Module | Description |
+|---------|--------|-------------|
+| **Natural Language Rule Compiler** | `nl_rule_compiler/compiler.py` | Write detection rules in plain English → compiled to executable rule sets with confidence, cooldown, scheduling |
+| **Ambient Intelligence Score** | `ambient_score/engine.py` | 9-signal Bayesian safety fusion: crowd, anomaly, audio, dwell, lighting, compliance, velocity, loitering, historical → single 0–1 safety score per zone |
+| **Predictive Interception** | `predictive_interception/interceptor.py` | Trajectory extrapolation + restricted-zone geometry → pre-emptive alerts before entry occurs |
+| **Gait DNA Biometrics** | `gait_dna/engine.py` | 32-dimensional movement fingerprint from pose sequences — re-identifies people without faces or clothing features |
+| **Anomaly Contagion Network** | `contagion/network.py` | Zone-to-zone anomaly propagation graph with Bayesian probability flow — detects cascade patterns |
+| **Déjà Vu Engine** | `deja_vu/engine.py` | Historical scene similarity matching via embedding cosine similarity — recognizes recurring suspicious patterns |
+
+---
+
+## Production Hardening
+
+| Area | Implementation |
+|------|---------------|
+| **Error Handling** | All 43 silent `except: pass` blocks replaced with structured `logger.warning()` calls |
+| **CORS** | Locked to `CORS_ORIGINS` env var (default: `http://localhost:3000`) — no more `allow_origins=["*"]` |
+| **Rate Limiting** | Token-bucket middleware at `RATE_LIMIT_RPM` per IP (default: 300 req/min) |
+| **Structured Logging** | JSON log formatter via `LOG_FORMAT=json` env var; Go processor uses `slog.NewJSONHandler` |
+| **Startup Health Checks** | `_check_connectivity()` verifies Neo4j, Qdrant, PostgreSQL on boot |
+| **Graceful Shutdown** | Lifespan manager closes DB pools, Neo4j driver, WebSocket connections |
+| **Go Batch Inserts** | BigQuery batch inserter (50 rows / 2s flush), exponential backoff retry (3 attempts) |
+| **Go Metrics** | Atomic counters for processed/errors/bq_rows/gcs_writes, logged every 30s |
+| **Dashboard State** | All 8 data-fetching pages migrated from `useState+useEffect` to TanStack Query hooks |
+
+---
+
+## Testing
+
+```bash
+# Run all tests
+pytest tests/ -v
+
+# Run a specific test file
+pytest tests/test_reasoning_engine.py -v
+```
+
+| Test File | Tests | Coverage |
+|-----------|-------|----------|
+| `test_reasoning_engine.py` | 9 | Crowd triggers, audio triggers, cooldown, custom rules, loitering duration, explanation chains |
+| `test_nl_rule_compiler.py` | 11 | Loitering, time constraints, running detection, crowd count, gunshot severity, list/delete/toggle/explain |
+| `test_ambient_score.py` | 10 | Empty scene, crowd pressure, audio alerts, anomaly propagation, signal contributions, trend detection |
+| `test_gait_dna.py` | 8 | Minimum observations, fingerprint computation, similarity matching, gallery management |
+| `test_contagion_network.py` | 8 | Empty network, propagation recording, probability increase, graph structure, risk profiles |
+| `test_deja_vu.py` | 10 | Encode/store, scene matching, camera filtering, incident confirmation, stats, top-k limits |
+| `test_predictive_interception.py` | 8 | Point-in-polygon (square, triangle, edge), interceptor initialization |
+
+---
+
+## CI/CD
+
+GitHub Actions pipeline (`.github/workflows/ci.yml`) runs on every push to `main`/`develop` and PRs to `main`:
+
+| Job | Steps |
+|-----|-------|
+| **python-tests** | Install deps → `pytest tests/ -v` → `ruff check` (Python 3.11 + 3.12 matrix) |
+| **dashboard** | `npm ci` → `tsc --noEmit` → `npm run build` |
+| **go-build** | `go build` → `go vet` |
+| **docker** | Build edge + cloud images (main branch only, after all checks pass) |
+
+---
+
 ## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed CORS origins |
+| `RATE_LIMIT_RPM` | `300` | Max requests per minute per IP |
+| `LOG_FORMAT` | `text` | Set to `json` for structured JSON logging |
+| `LOG_LEVEL` | `info` | Go processor log level (`info` / `debug`) |
 
 | Variable | Default | Description |
 |----------|---------|-------------|

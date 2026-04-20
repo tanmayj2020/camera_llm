@@ -1,0 +1,72 @@
+flowchart TB
+    ALERT["🚨 Alert Generated\n(severity + description + evidence)"] --> DEDUP
+
+    subgraph DEDUP["🔄 Semantic Deduplication"]
+        EMBED["GTE-Qwen2\nEmbedding"]
+        SIM["Cosine Similarity\nCheck (0.85 threshold)"]
+        WINDOW["Time/Location\nWindow Filter"]
+        EMBED --> SIM --> WINDOW
+    end
+
+    DEDUP --> ENGINE
+
+    subgraph ENGINE["⚡ Reflexion Action Engine"]
+        ASSESS["1️⃣ Severity\nAssessment"]
+        PLAN["2️⃣ Action Plan\nGeneration"]
+        CRITIQUE["3️⃣ Self-Critique\n(Reflexion)"]
+        SIMULATE["4️⃣ Counterfactual\nSimulation"]
+        EXECUTE["5️⃣ Execute\nPlaybook"]
+        LEARN["6️⃣ Outcome\nLearning"]
+        
+        ASSESS --> PLAN --> CRITIQUE
+        CRITIQUE -->|"revise"| PLAN
+        CRITIQUE -->|"accept"| SIMULATE
+        SIMULATE --> EXECUTE --> LEARN
+    end
+
+    ENGINE --> DETER
+
+    subgraph DETER["🔊 Voice Deterrence (4 Levels)"]
+        L1["Level 1\nGentle Reminder\n'Attention: This area\nis monitored'"]
+        L2["Level 2\nFirm Warning\n'You are being recorded.\nPlease leave the area'"]
+        L3["Level 3\nUrgent Command\n'Security has been\nalerted. Leave now'"]
+        L4["Level 4\nEmergency\n'Authorities dispatched.\nDo not move'"]
+        
+        L1 -.-> L2 -.-> L3 -.-> L4
+    end
+
+    ENGINE --> DISPATCH
+
+    subgraph DISPATCH["📤 Multi-Channel Dispatch"]
+        WS["WebSocket\n(Dashboard)"]
+        SLACK["Slack\nNotification"]
+        PD["PagerDuty\nIncident"]
+        TEAMS["Teams\nMessage"]
+        SIEM["SIEM\nForward"]
+        HTTP["Generic HTTP\n(HMAC signed)"]
+    end
+
+    ENGINE --> INVEST
+
+    subgraph INVEST["🔎 Auto Investigation"]
+        TRACE["Entity Trace\n(cross-camera)"]
+        ASSOCIATES["Associate\nDiscovery"]
+        TIMELINE_B["Evidence\nTimeline"]
+        REPORT["Investigation\nReport"]
+        TRACE --> ASSOCIATES --> TIMELINE_B --> REPORT
+    end
+
+    ENGINE --> EVIDENCE
+
+    subgraph EVIDENCE["📋 Evidence Package"]
+        HTML_E["HTML Bundle"]
+        CHAIN["Chain of\nCustody"]
+        META_E["Metadata\nSignature"]
+    end
+
+    style DEDUP fill:#1a3c34,stroke:#2ecc71,color:#fff
+    style ENGINE fill:#2d1b69,stroke:#9b59b6,color:#fff
+    style DETER fill:#3c1a1a,stroke:#e74c3c,color:#fff
+    style DISPATCH fill:#1e3a5f,stroke:#4a9eff,color:#fff
+    style INVEST fill:#3c3c1a,stroke:#f1c40f,color:#fff
+    style EVIDENCE fill:#1a1a2e,stroke:#e94560,color:#fff

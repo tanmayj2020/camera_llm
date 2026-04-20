@@ -46,7 +46,11 @@ class _TrajectoryBuffer:
 
 
 class PoseSequenceClassifier(nn.Module):
-    """1D-CNN over pose keypoint sequences for intent classification.
+    """Temporal Transformer over pose keypoint sequences for intent classification.
+
+    Architecture: linear projection → positional encoding → Transformer encoder → CLS token → FC.
+    Replaces the earlier 1D-CNN with self-attention for better temporal reasoning
+    (captures long-range dependencies like slow casing over 30 frames).
 
     Input: (batch, 30, 17*3=51) — 30 frames of 17 COCO keypoints with (x,y,conf).
     Output: (batch, 5) — probabilities for [normal, casing, pacing, evasive, aggressive].
@@ -54,16 +58,23 @@ class PoseSequenceClassifier(nn.Module):
 
     INTENT_CLASSES = ["normal", "casing", "nervous_pacing", "evasive_movement", "aggressive_approach"]
 
-    def __init__(self):
+    def __init__(self, d_model: int = 64, nhead: int = 4, num_layers: int = 2):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv1d(51, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
+        input_dim = 51  # 17 keypoints × 3 (x, y, conf)
+        self.input_proj = nn.Linear(input_dim, d_model)
+
+        # Learnable positional encoding for 30 frames
+        self.pos_embed = nn.Parameter(torch.randn(1, 31, d_model) * 0.02)  # +1 for CLS
+
+        # CLS token for classification
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=d_model * 4,
+            dropout=0.1, batch_first=True,
         )
-        self.fc = nn.Linear(64, len(self.INTENT_CLASSES))
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.fc = nn.Linear(d_model, len(self.INTENT_CLASSES))
         self._available = True
         self.eval()
 
@@ -98,8 +109,14 @@ class PoseSequenceClassifier(nn.Module):
                 flat.append(frame_flat[:51])
 
             x = torch.tensor([flat], dtype=torch.float32)  # (1, 30, 51)
-            x = x.permute(0, 2, 1)  # (1, 51, 30) for Conv1d
-            logits = self.fc(self.conv(x).squeeze(-1))  # (1, 5)
+            x = self.input_proj(x)                             # (1, 30, d_model)
+            # Prepend CLS token
+            cls = self.cls_token.expand(1, -1, -1)             # (1, 1, d_model)
+            x = torch.cat([cls, x], dim=1)                     # (1, 31, d_model)
+            x = x + self.pos_embed[:, :x.size(1)]
+            x = self.encoder(x)                                # (1, 31, d_model)
+            cls_out = x[:, 0]                                  # (1, d_model) — CLS token
+            logits = self.fc(cls_out)                          # (1, 5)
             probs = torch.softmax(logits, dim=-1).squeeze(0)
             return {name: float(probs[i]) for i, name in enumerate(self.INTENT_CLASSES)}
         except Exception as e:

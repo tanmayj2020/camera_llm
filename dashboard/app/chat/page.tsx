@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
 interface Message {
@@ -15,32 +16,31 @@ interface Message {
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
   const [cameraId, setCameraId] = useState("cam-0");
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return;
-    const userMsg: Message = { role: "user", content: input };
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
-    setLoading(true);
-
-    try {
-      const res = await api.query(input, cameraId);
-      const assistantMsg: Message = {
+  const queryMutation = useMutation({
+    mutationFn: (q: string) => api.query(q, cameraId),
+    onSuccess: (res) => {
+      setMessages((prev) => [...prev, {
         role: "assistant",
         content: res.answer,
         evidence: res.evidence,
         confidence: res.confidence,
         complexity: res.complexity,
         latency_ms: res.latency_ms,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-    } catch {
+      }]);
+    },
+    onError: () => {
       setMessages((prev) => [...prev, { role: "assistant", content: "Error processing query." }]);
-    } finally {
-      setLoading(false);
-    }
+    },
+  });
+
+  const sendMessage = async () => {
+    if (!input.trim() || queryMutation.isPending) return;
+    setMessages((prev) => [...prev, { role: "user", content: input }]);
+    const q = input;
+    setInput("");
+    queryMutation.mutate(q);
   };
 
   return (
@@ -79,7 +79,7 @@ export default function ChatPage() {
             </div>
           </div>
         ))}
-        {loading && <div className="text-sm text-[var(--text-muted)]">Thinking…</div>}
+        {queryMutation.isPending && <div className="text-sm text-[var(--text-muted)]">Thinking…</div>}
       </div>
 
       <div className="flex gap-2">
@@ -90,7 +90,7 @@ export default function ChatPage() {
           placeholder="Ask about your cameras…"
           className="flex-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg px-4 py-2 text-sm"
         />
-        <button onClick={sendMessage} disabled={loading}
+        <button onClick={sendMessage} disabled={queryMutation.isPending}
           className="bg-[var(--accent)] text-white px-4 py-2 rounded-lg text-sm hover:opacity-90 disabled:opacity-50">
           Send
         </button>

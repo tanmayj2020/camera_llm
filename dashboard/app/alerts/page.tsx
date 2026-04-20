@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createAlertWebSocket } from "@/lib/api";
+import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
 interface AlertItem {
@@ -30,10 +31,14 @@ export default function AlertsPage() {
     return () => ws.close();
   }, []);
 
-  const ack = async (eventId: string) => {
-    await api.acknowledgeAlert(eventId);
-    setAlerts((prev) => prev.map((a) => a.event_id === eventId ? { ...a, acknowledged: true } : a));
-  };
+  const ackMutation = useMutation({
+    mutationFn: (eventId: string) => api.acknowledgeAlert(eventId),
+    onSuccess: (_, eventId) => {
+      setAlerts((prev) => prev.map((a) => a.event_id === eventId ? { ...a, acknowledged: true } : a));
+    },
+  });
+
+  const ack = (eventId: string) => ackMutation.mutate(eventId);
 
   const severityColor: Record<string, string> = {
     critical: "border-red-500 bg-red-950",

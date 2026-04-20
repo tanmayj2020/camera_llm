@@ -1,0 +1,64 @@
+flowchart TB
+    subgraph DASHBOARD["🖥️ Next.js 14 Dashboard"]
+        direction TB
+
+        subgraph STATE["State Management"]
+            TQ["TanStack Query\n(Server State)"]
+            ZST["Zustand\n(Client State)"]
+            WS_M["WebSocket Manager\n(Real-time Alerts)"]
+        end
+
+        subgraph PAGES["17 Pages"]
+            direction LR
+            subgraph MONITOR["Monitoring"]
+                P1["🏠 Home\nOverview + Stats"]
+                P2["📹 Cameras\nCRUD Management"]
+                P3["📺 Video Wall\n2x2 Live Grid"]
+                P4["🚨 Alerts\nWS Feed + Causal"]
+            end
+
+            subgraph INTELLIGENCE["Intelligence"]
+                P5["💬 Chat\nConversational AI"]
+                P6["📊 KPIs\nMetrics + Narrative"]
+                P7["👤 Occupancy\nCounting + Charts"]
+                P8["🕸️ Graph\nKG Explorer"]
+            end
+
+            subgraph OPERATIONS["Operations"]
+                P9["🎯 Trackers\nNL Rule Builder"]
+                P10["🔎 Investigate\nEntity Deep-Dive"]
+                P11["🗺️ Floor Plan\nDigital Twin SVG"]
+                P12["📍 Zones\nGeofence Manager"]
+            end
+
+            subgraph FORENSICS["Forensics & Ops"]
+                P13["⏱️ Timeline\nIncident Timeline"]
+                P14["🔍 Search\nForensic AI Search"]
+                P15["🔗 Webhooks\nIntegration Mgr"]
+                P16["🖥️ Fleet\nEdge Health"]
+                P17["🗺️ Journey\nEntity Path Replay"]
+            end
+        end
+
+        subgraph COMPONENTS["Shared Components"]
+            HLS["HLS.js Player\n(Live Video)"]
+            SONNER["Sonner\n(Toast Notifications)"]
+            PROVIDER["TanStack Provider\n(Query Client)"]
+        end
+    end
+
+    subgraph API_LAYER["⚡ FastAPI Backend"]
+        REST["98+ REST Endpoints"]
+        WSS["WebSocket /ws/alerts"]
+    end
+
+    TQ -->|"fetch / mutate\n+ auto-refetch"| REST
+    WS_M -->|"real-time\nalerts"| WSS
+    PAGES --> STATE
+    STATE --> COMPONENTS
+
+    style DASHBOARD fill:#0f3460,stroke:#533483,color:#fff
+    style STATE fill:#2d1b69,stroke:#9b59b6,color:#fff
+    style PAGES fill:#1a1a2e,stroke:#e94560,color:#fff
+    style COMPONENTS fill:#1a3c34,stroke:#2ecc71,color:#fff
+    style API_LAYER fill:#3c3c1a,stroke:#f1c40f,color:#fff

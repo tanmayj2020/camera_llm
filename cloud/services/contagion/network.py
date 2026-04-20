@@ -218,7 +218,7 @@ class AnomalyContagionNetwork:
                 propagation_probability=min(1.0, prob),
                 avg_delay_s=avg_delay,
                 observation_count=len(delays),
-                last_observed=max(self._recent_events.get(src, [(0, "")])[0]
+                last_observed=max(self._recent_events.get(src, [(0, "")])[0][0]
                                   if self._recent_events.get(src) else 0,
                                   0),
             )

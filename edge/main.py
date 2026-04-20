@@ -85,14 +85,48 @@ def main():
     except ValueError:
         source = args.source
 
-    # Initialize components
+    # ── Startup banner ──
+    logger.info("╔══════════════════════════════════════════╗")
+    logger.info("║  VisionBrain Edge Pipeline               ║")
+    logger.info("║  Camera: %-30s ║", args.camera_id)
+    logger.info("║  Source: %-30s ║", str(source)[:30])
+    logger.info("║  Model: %-30s  ║", args.model)
+    logger.info("║  Classes: %-28s ║", ", ".join(args.classes)[:28])
+    logger.info("║  Mode: %-31s ║", args.mode)
+    logger.info("╚══════════════════════════════════════════╝")
+
+    # ── Initialize components with validation ──
     extractor = FrameExtractor(source, args.camera_id, args.min_fps, args.max_fps)
     privacy = PrivacyEngine() if not args.no_privacy else None
+
     detector = OpenVocabDetector(args.model, args.confidence)
     detector.set_classes(args.classes)
+    if not detector.is_open_vocab:
+        logger.warning("Open-vocab detection unavailable — using standard YOLO classes only")
+
     pose_estimator = PoseEstimator() if not args.no_pose else None
     activity_recognizer = ActivityRecognizer() if not args.no_pose else None
+
     emitter = EventEmitter(mode=args.mode, pubsub_topic=args.pubsub_topic, project_id=args.project_id)
+
+    # Validate Pub/Sub connectivity if needed
+    if args.mode == "pubsub":
+        if not args.project_id:
+            logger.error("--project-id required for pubsub mode")
+            sys.exit(1)
+        try:
+            emitter.health_check()
+            logger.info("✓ Pub/Sub topic verified")
+        except Exception as e:
+            logger.warning("✗ Pub/Sub connectivity not verified: %s", e)
+
+    # Validate video source
+    extractor.start()
+    test_frame = extractor.get_frame(timeout=5.0)
+    if test_frame is None:
+        logger.error("Cannot read from video source: %s — check RTSP URL or camera index", source)
+        sys.exit(1)
+    logger.info("✓ Video source accessible (%dx%d)", test_frame[0].shape[1], test_frame[0].shape[0])
 
     # Edge VLM (optional)
     vlm_scheduler = None
@@ -126,7 +160,6 @@ def main():
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    extractor.start()
     logger.info("Edge pipeline running — classes=%s, mode=%s, open_vocab=%s",
                 args.classes, args.mode, detector.is_open_vocab)
 

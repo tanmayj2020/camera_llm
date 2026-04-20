@@ -23,7 +23,7 @@ class SelfEvaluator:
             else:
                 try:
                     import google.generativeai as genai
-                    self._client = genai.GenerativeModel("gemini-2.0-flash")
+                    self._client = genai.GenerativeModel("gemini-2.5-flash")
                 except Exception as e:
                     logger.warning("Gemini init failed: %s — using stub", e)
                     self._client = "stub"

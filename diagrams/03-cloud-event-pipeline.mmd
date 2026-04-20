@@ -1,0 +1,60 @@
+flowchart TB
+    PUBSUB["📨 GCP Pub/Sub\nIncoming Event"] --> GOEP
+
+    subgraph GOEP["🔄 Go Event Processor"]
+        PARSE["JSON Parse\nVisionEvent"]
+        GCS_W["Store Keyframe\nin GCS"]
+        BATCH["Batch BQ Inserter\n(50 rows / 2s flush)"]
+        RETRY["Exponential Backoff\n(3 attempts max)"]
+        METRICS["Atomic Metrics\nprocessed | errors | bq_rows | gcs_writes"]
+        
+        PARSE --> GCS_W
+        PARSE --> BATCH
+        BATCH --> RETRY
+        PARSE --> METRICS
+    end
+
+    GOEP --> API
+
+    subgraph API["⚡ FastAPI /api/events Pipeline (20 Steps)"]
+        direction TB
+        S1["1️⃣ KG Ingest\n(Neo4j temporal edges)"]
+        S2["2️⃣ Spatial Memory Update\n(Depth Anything V2)"]
+        S3["3️⃣ Baseline Learning\n(hourly patterns)"]
+        S4["4️⃣ Cross-Camera Tracking\n(CLIP-ReID)"]
+        S5["5️⃣ Scene Graph Update\n(relationship edges)"]
+        S6["6️⃣ Crowd Dynamics\n(Social Force Model)"]
+        S7["7️⃣ Audio-Visual Fusion"]
+        S8["8️⃣ World Model Prediction\n(trajectory + crowd)"]
+        S9["9️⃣ Environment Detection\n(lighting, weather)"]
+        S10["🔟 Contextual Normality Check"]
+        S11["1️⃣1️⃣ Neuro-Symbolic Reasoning"]
+        S12["1️⃣2️⃣ Collective Anomaly Detection"]
+        S13["1️⃣3️⃣ Causal VLM Analysis\n(Gemini 2.5 Pro)"]
+        S14["1️⃣4️⃣ Custom Tracker Evaluation"]
+        S15["1️⃣5️⃣ Occupancy Update"]
+        S16["1️⃣6️⃣ Compliance Check\n(PPE, safety)"]
+        S17["1️⃣7️⃣ LPR Processing"]
+        S18["1️⃣8️⃣ NL Rule Compiler Eval"]
+        S19["1️⃣9️⃣ Ambient Score Compute"]
+        S20["2️⃣0️⃣ Predictive Interception"]
+
+        S1 --> S2 --> S3 --> S4 --> S5
+        S5 --> S6 --> S7 --> S8 --> S9
+        S9 --> S10 --> S11 --> S12 --> S13
+        S13 --> S14 --> S15 --> S16 --> S17
+        S17 --> S18 --> S19 --> S20
+    end
+
+    S20 --> OUT
+
+    subgraph OUT["📤 Output Fan-Out"]
+        WS["WebSocket\nAlert Stream"]
+        WH["Webhook\nDelivery"]
+        ACT["Action Engine\nDeterrence"]
+        STORE["Persistence\nStore"]
+    end
+
+    style GOEP fill:#1a3c34,stroke:#2ecc71,color:#fff
+    style API fill:#1a1a2e,stroke:#e94560,color:#fff
+    style OUT fill:#3c3c1a,stroke:#f1c40f,color:#fff

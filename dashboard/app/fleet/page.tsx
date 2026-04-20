@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { useFleetStatus } from "@/lib/hooks";
 
 interface Device {
   device_id: string;
@@ -16,14 +15,7 @@ interface Device {
 }
 
 export default function FleetPage() {
-  const [devices, setDevices] = useState<Device[]>([]);
-
-  useEffect(() => {
-    const load = () => api.getFleetStatus().then(setDevices).catch(console.error);
-    load();
-    const iv = setInterval(load, 5000);
-    return () => clearInterval(iv);
-  }, []);
+  const { data: devices = [], isLoading } = useFleetStatus(5000) as { data: Device[]; isLoading: boolean };
 
   const online = devices.filter((d) => d.status === "online").length;
   const offline = devices.length - online;

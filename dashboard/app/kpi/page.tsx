@@ -1,17 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { useState } from "react";
+import { useKPIs, useKPISummary } from "@/lib/hooks";
 
 export default function KPIPage() {
   const [cameraId, setCameraId] = useState("cam-0");
-  const [kpis, setKpis] = useState<any>(null);
-  const [summary, setSummary] = useState<any>(null);
-
-  useEffect(() => {
-    api.getKPIs(cameraId).then(setKpis).catch(() => {});
-    api.getKPISummary(cameraId).then(setSummary).catch(() => {});
-  }, [cameraId]);
+  const { data: kpis, isLoading } = useKPIs(cameraId);
+  const { data: summary } = useKPISummary(cameraId);
 
   const MetricCard = ({ label, value, trend }: { label: string; value: any; trend?: any }) => (
     <div className="bg-[var(--surface)] border border-[var(--border)] rounded-lg p-4">

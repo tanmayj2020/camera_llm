@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { useState } from "react";
+import { useSiteOccupancy, useOccupancy } from "@/lib/hooks";
 
 interface CameraOccupancy {
   camera_id: string;
@@ -25,26 +25,11 @@ interface SiteData {
 }
 
 export default function OccupancyPage() {
-  const [site, setSite] = useState<SiteData | null>(null);
+  const { data: site, isLoading } = useSiteOccupancy(5000) as { data: SiteData | undefined; isLoading: boolean };
   const [selectedCamera, setSelectedCamera] = useState<string>("");
-  const [cameraDetail, setCameraDetail] = useState<any>(null);
+  const { data: cameraDetail } = useOccupancy(selectedCamera, 5000);
 
-  useEffect(() => {
-    const load = () => api.getSiteOccupancy().then(setSite).catch(console.error);
-    load();
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    if (!selectedCamera) return;
-    const load = () => api.getOccupancy(selectedCamera).then(setCameraDetail).catch(console.error);
-    load();
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
-  }, [selectedCamera]);
-
-  if (!site) return <div className="max-w-4xl mx-auto text-[var(--text-muted)]">Loading…</div>;
+  if (isLoading || !site) return <div className="max-w-4xl mx-auto text-[var(--text-muted)]">Loading…</div>;
 
   const maxHourly = Math.max(...(site.hourly || []), 1);
 

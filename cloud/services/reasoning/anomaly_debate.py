@@ -84,11 +84,47 @@ class AnomalyDebateEngine:
             return self._stub_debate(anomaly)
 
     def _stub_debate(self, anomaly: dict) -> DebateResult:
+        """Rule-based debate when VLM is unavailable."""
         severity = anomaly.get("severity", "medium")
+        anomaly_type = anomaly.get("anomaly_type", "")
+        desc = anomaly.get("description", "anomaly detected")
+        from datetime import datetime, timezone
+        hour = datetime.now(timezone.utc).hour
+
+        # Prosecutor: build argument from anomaly metadata
+        pros_points = [f"Alert triggered: {desc}"]
+        if severity in ("high", "critical"):
+            pros_points.append(f"Severity classified as {severity} by rule engine")
+        if anomaly.get("audio_events"):
+            pros_points.append(f"Corroborating audio: {anomaly['audio_events']}")
+        if anomaly_type in ("loitering", "tailgating", "intrusion"):
+            pros_points.append(f"{anomaly_type} is a known precursor to security incidents")
+
+        # Defender: build counter-arguments
+        def_points = []
+        if 7 <= hour <= 18:
+            def_points.append("Event occurred during business hours — higher normal activity expected")
+        if severity in ("low", "medium"):
+            def_points.append(f"Severity is only {severity} — below critical threshold")
+        if anomaly_type in ("loitering",) and anomaly.get("duration_s", 0) < 120:
+            def_points.append("Short duration — may be someone waiting for a ride/colleague")
+        if not def_points:
+            def_points.append("Insufficient context to rule out benign explanation")
+
+        # Verdict: score-based
+        score = {"low": 0.2, "medium": 0.4, "high": 0.7, "critical": 0.9}.get(severity, 0.4)
+        if anomaly.get("audio_events"):
+            score += 0.1
+        if 22 <= hour or hour <= 5:
+            score += 0.1  # nighttime events more suspicious
+        score = min(1.0, score)
+        verdict = "suspicious" if score > 0.6 else ("likely_normal" if score < 0.35 else "inconclusive")
+
         return DebateResult(
             anomaly_id=anomaly.get("event_id", ""),
-            prosecutor_argument=f"Alert triggered: {anomaly.get('description', 'anomaly detected')}",
-            defender_argument="Insufficient context to rule out benign explanation.",
-            verdict="inconclusive" if severity in ("low", "medium") else "suspicious",
-            confidence=0.4,
+            prosecutor_argument="\n".join(f"• {p}" for p in pros_points),
+            defender_argument="\n".join(f"• {d}" for d in def_points),
+            verdict=verdict,
+            confidence=round(score, 2),
+            key_disagreements=["VLM unavailable — rule-based analysis only"],
         )

@@ -1,6 +1,16 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0a0a;
+  --color-surface: #141414;
+  --color-border: #262626;
+  --color-text: #ededed;
+  --color-text-muted: #888;
+  --color-accent: #3b82f6;
+  --color-danger: #ef4444;
+  --color-warning: #f59e0b;
+  --color-success: #22c55e;
+}
 
 :root {
   --bg: #0a0a0a;

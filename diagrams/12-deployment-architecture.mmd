@@ -1,0 +1,67 @@
+flowchart TB
+    subgraph SITES["🏢 Customer Sites"]
+        direction LR
+        subgraph SITE1["Site 1"]
+            CAM1["📹 Cameras"]
+            EDGE1["🖥️ Edge Device\n(Python · Docker)"]
+            CAM1 --> EDGE1
+        end
+        subgraph SITE2["Site 2"]
+            CAM2["📹 Cameras"]
+            EDGE2["🖥️ Edge Device\n(Python · Docker)"]
+            CAM2 --> EDGE2
+        end
+        subgraph SITE3["Site N"]
+            CAM3["📹 Cameras"]
+            EDGE3["🖥️ Edge Device\n(Python · Docker)"]
+            CAM3 --> EDGE3
+        end
+    end
+
+    EDGE1 & EDGE2 & EDGE3 --> PUBSUB["☁️ GCP Pub/Sub\n(Event Transport)"]
+
+    subgraph GKE["☸️ GKE Autopilot Cluster"]
+        direction TB
+        subgraph SERVICES["Kubernetes Services"]
+            API_POD["FastAPI Pod\n(cloud/Dockerfile)\nHPA: 2-10 replicas"]
+            GO_POD["Go Processor Pod\n(event_processor)\nHPA: 2-5 replicas"]
+            DASH_POD["Next.js Pod\n(dashboard/Dockerfile)\nReplicas: 2"]
+        end
+        
+        subgraph INGRESS["Ingress"]
+            LB["Cloud Load Balancer\n+ SSL Termination"]
+            CDN["Cloud CDN\n(static assets)"]
+        end
+    end
+
+    subgraph DATA["💾 Managed Data Services"]
+        NEO4J_M["Neo4j AuraDB\n(Knowledge Graph)"]
+        QDRANT_M["Qdrant Cloud\n(Vector Store)"]
+        PG_M["Cloud SQL\nPostgreSQL + pgvector"]
+        GCS_M["Cloud Storage\n(Keyframes)"]
+        BQ_M["BigQuery\n(Event Analytics)"]
+    end
+
+    subgraph MONITORING["📊 Observability"]
+        OTEL_C["OpenTelemetry\nCollector"]
+        LOGS["Cloud Logging\n(JSON structured)"]
+        METRICS_M["Cloud Monitoring\n(Dashboards)"]
+        TRACES["Cloud Trace\n(Distributed tracing)"]
+    end
+
+    PUBSUB --> GO_POD
+    GO_POD --> GCS_M
+    GO_POD --> BQ_M
+    API_POD --> NEO4J_M
+    API_POD --> QDRANT_M
+    API_POD --> PG_M
+    LB --> API_POD
+    LB --> DASH_POD
+    CDN --> DASH_POD
+    SERVICES --> OTEL_C
+    OTEL_C --> LOGS & METRICS_M & TRACES
+
+    style SITES fill:#1a1a2e,stroke:#e94560,color:#fff
+    style GKE fill:#0f3460,stroke:#533483,color:#fff
+    style DATA fill:#1a3c34,stroke:#2ecc71,color:#fff
+    style MONITORING fill:#3c3c1a,stroke:#f1c40f,color:#fff

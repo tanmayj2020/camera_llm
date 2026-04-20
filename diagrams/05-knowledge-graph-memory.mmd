@@ -1,0 +1,66 @@
+flowchart TB
+    subgraph INGEST["📥 Data Ingestion"]
+        EVT["Vision Events"]
+        XREF["Cross-Camera\nRe-ID Matches"]
+        AUDIO_IN["Audio Events"]
+    end
+
+    subgraph KG["📊 Temporal Knowledge Graph (Neo4j)"]
+        direction TB
+        NODES["Entity Nodes\n(person, vehicle, object)"]
+        EDGES["Bi-Temporal Edges\n(valid_from → valid_to)"]
+        REL["Relationship Types\nnear | following | blocking\napproaching | handing_object_to"]
+        GRAPHITI["Graphiti-Style\nEpisodic Encoding"]
+        
+        NODES --> EDGES
+        EDGES --> REL
+        REL --> GRAPHITI
+    end
+
+    subgraph HRAG["🔮 HyperGraphRAG"]
+        SIGLIB["SigLIP\nVisual Encoder"]
+        GTE["GTE-Qwen2\nText Embeddings"]
+        QDRANT_V[("Qdrant\nVector Store")]
+        NEO4J_G[("Neo4j\nGraph Store")]
+        HYBRID["Hybrid Retrieval\n(Vector + Graph Walk)"]
+        
+        SIGLIB --> QDRANT_V
+        GTE --> QDRANT_V
+        QDRANT_V --> HYBRID
+        NEO4J_G --> HYBRID
+    end
+
+    subgraph PROFILES["👤 Entity Profiles"]
+        PROF["Behavioral Profile\n(movement, habits, patterns)"]
+        HIST["Appearance History\n(embeddings over time)"]
+        ASSOC["Associate Graph\n(co-occurrence links)"]
+    end
+
+    subgraph MEMORY["🧠 3-Layer Agent Memory"]
+        EPISODIC["Episodic\n(raw event memory)"]
+        SEMANTIC["Semantic\n(learned patterns)"]
+        PROCEDURAL["Procedural\n(action recipes)"]
+        
+        EPISODIC -->|"auto-promote\n(frequency)"| SEMANTIC
+        SEMANTIC -->|"auto-promote\n(success rate)"| PROCEDURAL
+    end
+
+    subgraph SCENE["🎬 Dynamic Scene Graph"]
+        S_NODES["Entity Positions\n+ Velocities"]
+        S_EDGES["Relationship Edges\n(distance-based)"]
+        TRANS["Suspicious Transition\nDetection"]
+        S_NODES --> S_EDGES --> TRANS
+    end
+
+    INGEST --> KG
+    INGEST --> HRAG
+    KG --> PROFILES
+    KG --> MEMORY
+    KG --> SCENE
+    HRAG --> QUERY["🔍 Query Engine\n(NL → Graph + Vector)"]
+
+    style KG fill:#2d1b69,stroke:#9b59b6,color:#fff
+    style HRAG fill:#1e3a5f,stroke:#4a9eff,color:#fff
+    style PROFILES fill:#1a3c34,stroke:#2ecc71,color:#fff
+    style MEMORY fill:#3c3c1a,stroke:#f1c40f,color:#fff
+    style SCENE fill:#3c1a1a,stroke:#e74c3c,color:#fff

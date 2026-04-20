@@ -1,6 +1,7 @@
 """Task 9: Causal Anomaly Understanding with VLM + Hallucination Guardrails.
 
-VLM: Gemini 2.5 Pro (SOTA multimodal reasoning, 2025) with structured JSON output.
+VLM: Gemini 2.5 Pro (SOTA multimodal reasoning, 2025-2026) with structured JSON output.
+Configurable model — swap to gemini-3.0-pro or claude-4 when available.
 """
 
 import base64

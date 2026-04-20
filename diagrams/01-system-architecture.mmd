@@ -1,0 +1,107 @@
+graph TB
+    subgraph EDGE["🎥 EDGE LAYER (Per-Site · Python)"]
+        direction TB
+        RTSP["📹 Adaptive RTSP\nCapture"]
+        DET["🔍 YOLO-World v2\n+ YOLO11 Detection"]
+        POSE["🦴 ViTPose++\nPose Estimation"]
+        VLM["🧠 Qwen2.5-VL-3B\nEdge VLM"]
+        AUDIO["🔊 BEATs/AST\nAudio Classification"]
+        PRIV["🔒 InsightFace SCRFD\n+ YOLO Plate Blur"]
+        EMIT["📤 Event Emitter\n(Pub/Sub)"]
+        
+        RTSP --> DET
+        DET --> POSE
+        DET --> VLM
+        RTSP --> AUDIO
+        DET --> PRIV
+        POSE --> EMIT
+        VLM --> EMIT
+        AUDIO --> EMIT
+        PRIV --> EMIT
+    end
+
+    subgraph TRANSPORT["☁️ TRANSPORT"]
+        PUBSUB["GCP Pub/Sub"]
+    end
+
+    subgraph CLOUD["⚡ CLOUD LAYER (FastAPI + Go · 55+ Services)"]
+        direction TB
+        GOEP["🔄 Go Event Processor\n(Batch BQ · Retry · slog)"]
+        
+        subgraph INTEL["Core Intelligence"]
+            KG["📊 Temporal KG\n(Neo4j)"]
+            SPATIAL["🗺️ Spatial Memory\n(Depth Anything V2)"]
+            BASELINE["📈 Baseline Learner"]
+            WORLD["🌍 World Model\nPredictor"]
+        end
+        
+        subgraph REASON["Reasoning & Anomaly"]
+            NEURO["🧩 Neuro-Symbolic\nRule Engine"]
+            CONTEXT["📋 Contextual\nNormality"]
+            COLLECTIVE["👥 Collective\nAnomaly"]
+            CAUSAL["🔬 Gemini 2.5 Pro\nCausal VLM"]
+        end
+        
+        subgraph AGENTS["Agents & Actions"]
+            ACTION["⚡ Reflexion\nAction Engine"]
+            INVEST["🔎 Auto\nInvestigator"]
+            CONV["💬 Conversational\nAgent"]
+            PROACTIVE["📡 Proactive\nAgent"]
+        end
+        
+        subgraph ANALYTICS["Analytics & Operations"]
+            OCC["👤 Occupancy"]
+            DWELL["⏱️ Dwell Time"]
+            HEAT["🌡️ Heatmaps"]
+            RETAIL["🛒 Retail"]
+            LPR2["🚗 LPR"]
+            COMPLY["🦺 Compliance"]
+        end
+        
+        subgraph NOVEL["🌟 Novel Features"]
+            NLRC["📝 NL Rule Compiler"]
+            AMBIENT["🎯 Ambient Score"]
+            PREDICT["🚨 Predictive\nInterception"]
+            GAIT["🧬 Gait DNA"]
+            CONTAGION["🔗 Contagion\nNetwork"]
+            DEJAVU["♻️ Déjà Vu\nEngine"]
+        end
+        
+        GOEP --> INTEL
+        INTEL --> REASON
+        REASON --> AGENTS
+        REASON --> ANALYTICS
+        REASON --> NOVEL
+    end
+
+    subgraph STORAGE["💾 STORAGE LAYER"]
+        NEO4J[("Neo4j\n(Knowledge Graph)")]
+        QDRANT[("Qdrant\n(Vector Store)")]
+        PG[("PostgreSQL\n+ pgvector")]
+        GCS[("GCS\n(Keyframes)")]
+        BQ[("BigQuery\n(Events)")]
+    end
+
+    subgraph DASH["🖥️ DASHBOARD (Next.js 14 · 17 Pages)"]
+        direction LR
+        HOME["Home"]
+        CAM["Cameras"]
+        WALL["Video Wall"]
+        ALERT["Alerts"]
+        CHAT["Chat"]
+        KPI["KPIs"]
+        FLOOR["Floor Plan"]
+        SEARCH["Search"]
+    end
+
+    EDGE --> TRANSPORT
+    TRANSPORT --> CLOUD
+    CLOUD --> STORAGE
+    CLOUD --> DASH
+
+    style EDGE fill:#1a1a2e,stroke:#e94560,color:#fff
+    style TRANSPORT fill:#16213e,stroke:#0f3460,color:#fff
+    style CLOUD fill:#0f3460,stroke:#533483,color:#fff
+    style STORAGE fill:#1a1a2e,stroke:#e94560,color:#fff
+    style DASH fill:#16213e,stroke:#0f3460,color:#fff
+    style NOVEL fill:#2d1b69,stroke:#e94560,color:#fff

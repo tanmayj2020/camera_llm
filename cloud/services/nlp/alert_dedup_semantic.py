@@ -1,6 +1,6 @@
 """Semantic alert deduplication — SOTA sentence embeddings.
 
-Embedding priority: GTE-Qwen2 (MTEB #1, 2024) → NV-Embed-v2 → all-MiniLM-L6-v2 → n-gram stub.
+Embedding priority: GTE-Qwen2 (MTEB #1) → NV-Embed-v2 → BGE-M3 → n-gram stub.
 """
 
 import logging
@@ -47,12 +47,12 @@ class SemanticDeduplicator:
         except Exception as e:
             logger.info("NV-Embed unavailable (%s), trying MiniLM", e)
 
-        # Priority 3: all-MiniLM-L6-v2 (lightweight fallback)
+        # Priority 3: BGE-M3 (BAAI, 2024-2026 — multi-lingual, MTEB top-10)
         try:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
-            self._backend = "minilm"
-            logger.info("all-MiniLM-L6-v2 sentence embeddings loaded (fallback)")
+            self._model = SentenceTransformer("BAAI/bge-m3")
+            self._backend = "bge-m3"
+            logger.info("BGE-M3 sentence embeddings loaded (fallback)")
             return self._model
         except Exception as e:
             logger.warning("sentence-transformers unavailable, using n-gram stub: %s", e)

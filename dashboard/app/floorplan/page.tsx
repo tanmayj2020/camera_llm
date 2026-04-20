@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { fetchAPI } from "../../lib/api";
+import { useState } from "react";
+import { useFloorPlan } from "@/lib/hooks";
 
 interface FloorPlanData {
   timestamp: number;
@@ -15,19 +15,11 @@ interface FloorPlanData {
 }
 
 export default function FloorPlanPage() {
-  const [data, setData] = useState<FloorPlanData | null>(null);
+  const { data, isLoading } = useFloorPlan(3000) as { data: FloorPlanData | undefined; isLoading: boolean };
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
 
-  const load = () => fetchAPI("/api/floorplan").then(setData).catch(console.error);
-
-  useEffect(() => {
-    load();
-    const interval = setInterval(load, 3000);
-    return () => clearInterval(interval);
-  }, []);
-
-  if (!data) return <p className="text-[var(--text-muted)]">Loading floor plan...</p>;
+  if (isLoading || !data) return <p className="text-[var(--text-muted)]">Loading floor plan...</p>;
 
   const W = data.site.width;
   const H = data.site.height;

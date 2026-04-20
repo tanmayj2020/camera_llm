@@ -155,7 +155,7 @@ class WhatIfSimulator:
         return {}
 
     def _recent_scores(self, rule_id: str) -> list[float]:
-        """Stub: return trajectory confidence scores as proxy for alert scores."""
+        """Return trajectory confidence scores as proxy for alert threshold replay."""
         if not self._world_model:
             return []
         scores = []

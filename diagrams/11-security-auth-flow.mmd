@@ -1,0 +1,59 @@
+flowchart TB
+    CLIENT["🖥️ Client Request"] --> CORS
+
+    subgraph SECURITY["🔐 Security Middleware Stack"]
+        direction TB
+        CORS["CORS Check\n(CORS_ORIGINS env var)"]
+        RATE["Rate Limiter\n(Token Bucket · 300 RPM/IP)"]
+        AUTH_MW["Auth Middleware\n(API Key / JWT)"]
+        
+        CORS --> RATE --> AUTH_MW
+    end
+
+    AUTH_MW --> ROUTE{"Route Type?"}
+
+    ROUTE -->|"Public"| PUBLIC["Health Check\nSystem Status"]
+    ROUTE -->|"Authenticated"| AUTH_CHECK
+
+    subgraph AUTH_CHECK["🔑 Authentication"]
+        API_KEY["API Key Auth\n(SHA-256 hash lookup)"]
+        JWT_AUTH["JWT Bearer Token\n(RS256 verification)"]
+        TENANT["Tenant Isolation\n(camera-level access)"]
+        API_KEY --> TENANT
+        JWT_AUTH --> TENANT
+    end
+
+    AUTH_CHECK --> ACCESS{"Access Level?"}
+
+    subgraph LEVELS["👁️ 4 Access Levels (Forensic Search)"]
+        L_ANON["anonymous\nBlurred faces,\nredacted metadata"]
+        L_OP["operator\nPartial metadata,\nblurred faces"]
+        L_SUP["supervisor\nFull metadata,\nface visible"]
+        L_ADMIN["admin\nFull access,\nraw data export"]
+    end
+
+    ACCESS --> LEVELS
+
+    subgraph PRIVACY_L["🔒 Privacy Controls"]
+        BLUR_F["Face Blur\n(InsightFace SCRFD)"]
+        BLUR_P["Plate Blur\n(YOLO detector)"]
+        PII["PII Redaction\n(name, ID stripping)"]
+        CONSENT_C["Consent Check\n(GDPR compliance)"]
+        AUDIT_L["Audit Logging\n(all access recorded)"]
+        RETENTION["Data Retention\n(auto-enforce TTL)"]
+    end
+
+    LEVELS --> PRIVACY_L --> RESPONSE["✅ Response\n(privacy-filtered)"]
+
+    subgraph LOGGING["📋 Structured Logging"]
+        JSON_L["JSON Format\n(LOG_FORMAT=json)"]
+        OTEL["OpenTelemetry\n(traces + metrics)"]
+    end
+
+    SECURITY --> LOGGING
+
+    style SECURITY fill:#3c1a1a,stroke:#e74c3c,color:#fff
+    style AUTH_CHECK fill:#2d1b69,stroke:#9b59b6,color:#fff
+    style LEVELS fill:#1e3a5f,stroke:#4a9eff,color:#fff
+    style PRIVACY_L fill:#1a3c34,stroke:#2ecc71,color:#fff
+    style LOGGING fill:#3c3c1a,stroke:#f1c40f,color:#fff

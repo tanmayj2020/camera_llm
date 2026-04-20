@@ -1,29 +1,29 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
+import { useCameras } from "@/lib/hooks";
 import { api } from "@/lib/api";
 
 interface Result { result_id: string; timestamp: number; camera_id: string; description: string; entity_class: string; relevance: number }
 
 export default function SearchPage() {
-  const [cameras, setCameras] = useState<string[]>([]);
+  const { data: cameras = [] } = useCameras();
   const [query, setQuery] = useState("");
   const [accessLevel, setAccessLevel] = useState("anonymous");
   const [camFilter, setCamFilter] = useState("");
   const [timeRange, setTimeRange] = useState("24h");
   const [results, setResults] = useState<Result[]>([]);
-  const [loading, setLoading] = useState(false);
 
-  useEffect(() => { api.listCameras().then(setCameras).catch(console.error); }, []);
+  const searchMutation = useMutation({
+    mutationFn: () => api.forensicSearch(query, accessLevel, camFilter || undefined),
+    onSuccess: (res) => setResults(Array.isArray(res) ? res : res.results || []),
+    onError: () => setResults([]),
+  });
 
-  const search = async () => {
+  const search = () => {
     if (!query.trim()) return;
-    setLoading(true);
-    try {
-      const res = await api.forensicSearch(query, accessLevel, camFilter || undefined);
-      setResults(Array.isArray(res) ? res : res.results || []);
-    } catch { setResults([]); }
-    setLoading(false);
+    searchMutation.mutate();
   };
 
   return (
@@ -38,9 +38,9 @@ export default function SearchPage() {
           placeholder="Search across all cameras... (e.g. 'person with red backpack')"
           className="flex-1 bg-[var(--surface)] border border-[var(--border)] rounded px-4 py-2.5 text-sm text-[var(--text)]"
         />
-        <button onClick={search} disabled={loading}
+        <button onClick={search} disabled={searchMutation.isPending}
           className="bg-[var(--accent)] hover:opacity-90 disabled:opacity-50 px-5 py-2.5 rounded text-sm text-white">
-          {loading ? "…" : "Search"}
+          {searchMutation.isPending ? "…" : "Search"}
         </button>
       </div>
 
@@ -56,7 +56,7 @@ export default function SearchPage() {
         <select value={camFilter} onChange={(e) => setCamFilter(e.target.value)}
           className="bg-[var(--surface)] border border-[var(--border)] rounded px-3 py-1 text-xs text-[var(--text)]">
           <option value="">All cameras</option>
-          {cameras.map((c) => <option key={c} value={c}>{c}</option>)}
+          {cameras.map((c: any) => <option key={c.camera_id ?? c} value={c.camera_id ?? c}>{c.name ?? c}</option>)}
         </select>
         <select value={accessLevel} onChange={(e) => setAccessLevel(e.target.value)}
           className="bg-[var(--surface)] border border-[var(--border)] rounded px-3 py-1 text-xs text-[var(--text)]">

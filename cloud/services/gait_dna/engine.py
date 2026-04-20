@@ -41,6 +41,36 @@ MIN_OBSERVATIONS = 30
 # Window size for feature extraction
 WINDOW_SIZE = 60  # frames
 
+# Per-feature normalization scales (approximate physical max values).
+# Equalizes contribution of each dimension before unit normalization
+# so gait-shape features (cadence, autocorrelation) aren't overwhelmed
+# by speed-magnitude features.
+_FEATURE_SCALES = np.array([
+    2.0,   # 0: stride length (m)
+    1.0,   # 1: stride std
+    5.0,   # 2: mean speed (m/s)
+    2.0,   # 3: speed std
+    5.0,   # 4: p25 speed
+    5.0,   # 5: p75 speed
+    3.0,   # 6: cadence (Hz)
+    1.0,   # 7: cadence std
+    10.0,  # 8: accel mean
+    10.0,  # 9: accel std
+    1.0,   # 10: turn rate mean
+    1.0,   # 11: turn rate std
+    1.0,   # 12: path straightness
+    3.0,   # 13: direction entropy
+    1.0,   # 14: pause freq
+    5.0,   # 15: pause duration
+    0.5,   # 16: micro-movement
+    1.0,   # 17: autocorrelation lag-1
+    1.0,   # 18: autocorrelation lag-3
+    3.14,  # 19: heading skew
+    2.0,   # 20: speed CoV
+    10.0,  # 21: step regularity
+    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  # 22-31: pose
+], dtype=np.float32)
+
 
 @dataclass
 class GaitFingerprint:
@@ -268,7 +298,8 @@ class GaitDNAEngine:
             pose_features = self._extract_pose_features(poses)
             features[22:32] = pose_features[:10]
 
-        # Normalize to unit vector
+        # Per-feature scaling then unit normalize
+        features /= _FEATURE_SCALES
         norm = np.linalg.norm(features)
         if norm > 0:
             features = features / norm

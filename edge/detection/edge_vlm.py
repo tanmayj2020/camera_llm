@@ -1,6 +1,7 @@
 """Lightweight VLM on edge device — sub-second scene descriptions without cloud.
 
-Priority: Qwen2.5-VL-3B (SOTA small VLM, 2025) → InternVL3-2B → InternVL2-2B fallback.
+Priority: Qwen3-VL-4B (SOTA edge VLM, 2026) → Qwen2.5-VL-7B → Qwen2.5-VL-3B
+        → InternVL3-2B → InternVL2-2B fallback.
 EdgeVLMScheduler runs checks on interval or when anomaly score spikes.
 """
 
@@ -28,14 +29,20 @@ class SceneDescription:
 
 
 class EdgeVLM:
-    """Lightweight VLM for edge inference — Qwen2.5-VL-3B (SOTA small VLM).
+    """Lightweight VLM for edge inference — Qwen3-VL-4B (2026 SOTA edge VLM).
 
-    Qwen2.5-VL-3B outperforms InternVL2-2B on scene understanding benchmarks
-    while supporting dynamic resolution and video frame understanding.
+    Model priority chain:
+    • Qwen3-VL-4B  — latest Qwen3 vision-language model (Q1 2026), best quality/size ratio
+    • Qwen2.5-VL-7B — higher accuracy when compute allows
+    • Qwen2.5-VL-3B — efficient edge inference with dynamic resolution
+    • InternVL3-2B  — OpenGVLab alternative
+    • InternVL2-2B  — legacy fallback
     """
 
     # Ordered by preference
     _MODEL_CHAIN = [
+        "Qwen/Qwen3-VL-4B-Instruct",
+        "Qwen/Qwen2.5-VL-7B-Instruct",
         "Qwen/Qwen2.5-VL-3B-Instruct",
         "OpenGVLab/InternVL3-2B",
         "OpenGVLab/InternVL2-2B",
@@ -58,7 +65,7 @@ class EdgeVLM:
             if model_id is None:
                 continue
             try:
-                if "qwen2" in model_id.lower() or "qwen2.5" in model_id.lower():
+                if "qwen" in model_id.lower() and "vl" in model_id.lower():
                     self._load_qwen2vl(model_id)
                 else:
                     self._load_internvl(model_id)

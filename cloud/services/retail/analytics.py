@@ -79,4 +79,16 @@ class RetailAnalytics:
     def get_attention_heatmap(self) -> list[list[float]]:
         if self._heatmap and hasattr(self._heatmap, "get_dwell_weighted"):
             return self._heatmap.get_dwell_weighted()
-        return []
+        # Fallback: generate zone-based attention from dwell data
+        if self._dwell_analyzer and hasattr(self._dwell_analyzer, "_zone_dwells"):
+            grid_size = 10
+            grid = [[0.0] * grid_size for _ in range(grid_size)]
+            for zone_id, dwells in self._dwell_analyzer._zone_dwells.items():
+                if dwells:
+                    avg_dwell = sum(dwells) / len(dwells)
+                    # Hash zone_id to grid position
+                    h = hash(zone_id) % (grid_size * grid_size)
+                    r, c = divmod(h, grid_size)
+                    grid[r][c] = min(1.0, avg_dwell / 300.0)  # normalize to 5 min max
+            return grid
+        return [[0.0] * 10 for _ in range(10)]
